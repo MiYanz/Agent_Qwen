@@ -1,0 +1,139 @@
+{
+  "mcpServers": {
+    "filesystem": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@modelcontextprotocol/server-filesystem",
+        "D:\\"
+      ],
+      "env": {}
+    },
+    "duckduckgo-search": {
+      "command": "python",
+      "args": [
+        "-m",
+        "uv",
+        "tool",
+        "run",
+        "--from",
+        "duckduckgo-mcp-server[browser]==0.7.0",
+        "duckduckgo-mcp-server",
+        "--search-backend",
+        "auto"
+      ],
+      "env": {},
+      "includeTools": [
+        "search",
+        "fetch_content"
+      ]
+    },
+    "browser": {
+      "command": "D:\\46-Agent\\mcp_servers\\node_modules\\node\\bin\\node.exe",
+      "args": [
+        "D:\\46-Agent\\mcp_servers\\node_modules\\@playwright\\mcp\\cli.js",
+        "--headless",
+        "--isolated",
+        "--browser",
+        "msedge",
+        "--no-webmcp",
+        "--image-responses",
+        "omit",
+        "--output-dir",
+        "D:\\46-Agent\\workspace\\browser"
+      ],
+      "env": {},
+      "includeTools": [
+        "browser_navigate",
+        "browser_snapshot",
+        "browser_evaluate"
+      ]
+    },
+    "pdf": {
+      "command": "python",
+      "args": [
+        "-m",
+        "uv",
+        "tool",
+        "run",
+        "--from",
+        "markitdown-mcp==0.0.1a7",
+        "--with",
+        "markitdown[all]",
+        "markitdown-mcp"
+      ],
+      "env": {},
+      "toolPrefix": "pdf",
+      "descriptionPrefix": "Convert PDF, Markdown, and text documents to Markdown."
+    },
+    "office": {
+      "command": "python",
+      "args": [
+        "-m",
+        "uv",
+        "tool",
+        "run",
+        "--from",
+        "markitdown-mcp==0.0.1a7",
+        "--with",
+        "markitdown[all]",
+        "markitdown-mcp"
+      ],
+      "env": {},
+      "toolPrefix": "office",
+      "descriptionPrefix": "Convert Word, Excel, and PowerPoint files to Markdown."
+    },
+    "office-writer": {
+      "command": "python",
+      "args": [
+        "D:\\46-Agent\\mcp_servers\\office_writer_server.py"
+      ],
+      "env": {},
+      "toolPrefix": "office",
+      "includeTools": [
+        "create_docx"
+      ],
+      "descriptionPrefix": "Create a valid Microsoft Word Office Open XML document."
+    },
+    "memory": {
+      "command": "D:\\46-Agent\\mcp_servers\\node_modules\\node\\bin\\node.exe",
+      "args": [
+        "D:\\46-Agent\\mcp_servers\\node_modules\\@modelcontextprotocol\\server-memory\\dist\\index.js"
+      ],
+      "env": {
+        "MEMORY_FILE_PATH": "D:\\46-Agent\\memory\\memory.jsonl"
+      },
+      "includeTools": [
+        "create_entities",
+        "add_observations",
+        "search_nodes"
+      ]
+    },
+    "computer": {
+      "command": "python",
+      "args": [
+        "-m",
+        "uv",
+        "tool",
+        "run",
+        "--python",
+        "3.12",
+        "--from",
+        "windows-mcp==0.8.5",
+        "windows-mcp",
+        "serve",
+        "--transport",
+        "stdio",
+        "--tools",
+        "DisplayInventory,Screenshot,Snapshot"
+      ],
+      "env": {
+        "UV_PYTHON_INSTALL_DIR": "D:\\46-Agent\\mcp_servers\\.uv-python",
+        "WINDOWS_MCP_SCREENSHOT_SCALE": "0.5"
+      },
+      "includeTools": [
+        "Snapshot"
+      ]
+    }
+  }
+}

@@ -1,0 +1,37 @@
+# 默认忽略的文件
+/shelf/
+/workspace.xml
+# 基于编辑器的 HTTP 客户端请求
+/httpRequests/
+# Datasource local storage ignored files
+/dataSources/
+/dataSources.local.xml
+# Python缓存文件
+__pycache__/
+*.pyc
+*.pyo
+*.py[cod]
+
+# IDEA整个配置目录
+.idea/
+*.iml
+
+# 虚拟环境
+venv/
+env/
+
+# 临时日志
+*.log
+*.tmp
+
+# Node/MCP dependencies (restore with npm install)
+mcp_servers/node_modules/
+
+# Runtime output and local user data
+workspace/
+memory/*.jsonl
+
+# Local secrets
+.env
+.env.*
+!.env.example

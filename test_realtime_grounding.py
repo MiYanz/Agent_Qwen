@@ -15,16 +15,19 @@ if hasattr(sys.stdout, "reconfigure"):
 
 
 class EmptyResult:
+    """模拟 MCP 成功返回但没有任何内容块的结果。"""
     content = []
     isError = False
 
 
 class EmptySearchManager:
+    """提供最小 call_tool 接口，用于离线测试空结果包装逻辑。"""
     async def call_tool(self, *args, **kwargs):
         return EmptyResult()
 
 
 async def test_empty_result():
+    """确认空工具结果会转换为明确的 failed JSON。"""
     search = _make_tool_coroutine(
         EmptySearchManager(),
         "duckduckgo-search",
@@ -38,6 +41,7 @@ async def test_empty_result():
 
 
 async def test_live_hot_search():
+    """联网验证热搜必须经过搜索和正文获取，且不能生成占位标题。"""
     async with MCPManager(CONFIG_PATH) as manager:
         graph = await create_graph(manager)
         result = await graph.ainvoke(
@@ -66,6 +70,7 @@ async def test_live_hot_search():
 
 
 async def main(live):
+    """默认只跑离线测试；--live 才会执行真实网络搜索。"""
     await test_empty_result()
     if live:
         await test_live_hot_search()

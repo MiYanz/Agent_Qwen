@@ -10,6 +10,7 @@ from mcp_client.tools import CONFIG_PATH
 
 
 async def main():
+    """创建真实 DOCX，并验证 ZIP 结构和可读文字。"""
     desktop = Path(os.environ.get("USERPROFILE", str(Path.home()))) / "Desktop"
     output_path = desktop / "Local-Personal-Agent-Office-MCP-Test.docx"
 
@@ -26,6 +27,7 @@ async def main():
         )
     print(result)
 
+    # 先检查文件存在和 ZIP 完整性，再使用 python-docx 做高层解析验证。
     assert output_path.exists() and output_path.stat().st_size > 0
     assert ZipFile(output_path).testzip() is None
     with ZipFile(output_path) as package:

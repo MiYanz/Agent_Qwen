@@ -44,9 +44,11 @@ CASES = (
         {"list_directory"},
     ),
 )
+# 每个用例依次保存名称、用户问题，以及预期至少出现的一个工具名称。
 
 
 async def run_case(graph, name, query, expected_tools):
+    """执行单个行为用例，并验证工具结果最终经过 Agent 二次处理。"""
     result = await graph.ainvoke({"messages": [HumanMessage(content=query)]})
     messages = result["messages"]
     tool_messages = [m for m in messages if isinstance(m, ToolMessage)]
@@ -56,6 +58,7 @@ async def run_case(graph, name, query, expected_tools):
     assert isinstance(final, AIMessage) and not final.tool_calls
     assert str(final.content).strip()
     assert expected_tools & tool_names, (name, expected_tools, tool_names)
+    # 最终回答不能与任一 ToolMessage 完全相同，防止工具原始结果直出。
     assert all(str(final.content).strip() != str(m.content).strip() for m in tool_messages)
     assert not str(final.content).lstrip().startswith("Found ")
 
@@ -67,6 +70,7 @@ async def run_case(graph, name, query, expected_tools):
 
 
 async def main():
+    """复用一个 MCPManager 和 Graph 顺序执行全部回归用例。"""
     async with MCPManager(CONFIG_PATH) as manager:
         graph = await create_graph(manager)
         for case in CASES:

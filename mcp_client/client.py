@@ -15,9 +15,11 @@ NETWORK_MCP_SERVERS = {
     "pdf",
     "office",
 }
+# 只有需要访问网络的子进程继承系统代理；Filesystem 等本地服务不受代理影响。
 
 
 def _masked_proxy(proxy):
+    """隐藏代理 URL 中可能包含的账号信息，避免日志泄露凭据。"""
     if not proxy:
         return "disabled"
     if "@" not in proxy:
@@ -27,7 +29,10 @@ def _masked_proxy(proxy):
 
 
 class MCPClient:
+    """读取 MCP 配置，并按配置构造短生命周期客户端连接。"""
+
     def __init__(self, config_path):
+        # Path.open 配合 with 使用，读取结束后文件句柄会自动关闭。
         config_path = Path(config_path)
         with config_path.open("r", encoding="utf-8") as file:
             self.config = json.load(file)
@@ -35,10 +40,13 @@ class MCPClient:
         self.servers = self.config["mcpServers"]
 
     def get_server_params(self, server_name):
+        """把单个 Server 配置转换为 MCP stdio 启动参数。"""
         server = self.servers[server_name]
         command = server["command"]
         if command in {"python", "python3"}:
+            # 使用当前 Conda 环境的解释器，避免子进程落到系统 Python。
             command = sys.executable
+        # 从父进程环境复制一份，后续修改不会污染当前 Python 进程的 os.environ。
         server_env = os.environ.copy()
         server_env.setdefault(
             "NPM_CONFIG_CACHE",
@@ -70,6 +78,7 @@ class MCPClient:
                 flush=True,
             )
         server_env.update(server.get("env", {}))
+        # 配置文件中的 env 最后覆盖默认值，便于为单个 Server 指定专用环境变量。
         return StdioServerParameters(
             command=command,
             args=server["args"],
@@ -77,7 +86,9 @@ class MCPClient:
         )
 
     async def get_tools(self, server_name="filesystem"):
+        """临时启动一个 Server，初始化 Session，并返回它公开的工具定义。"""
         server_params = self.get_server_params(server_name)
+        # async with 会在离开代码块时异步关闭 stdio 连接、Session 和子进程。
         async with stdio_client(server_params) as (read, write):
             async with ClientSession(read, write) as session:
                 await session.initialize()
@@ -85,6 +96,7 @@ class MCPClient:
                 return tools.tools
 
     async def get_all_tools(self):
+        """依次发现配置中的全部工具；该方法每次都会临时连接各 Server。"""
         all_tools = []
         for server_name in self.servers:
             server_tools = await self.get_tools(server_name)
@@ -97,6 +109,7 @@ class MCPClient:
         arguments,
         server_name="filesystem",
     ):
+        """通过一次临时 MCP Session 调用工具；长期复用由 MCPManager 负责。"""
         server_params = self.get_server_params(server_name)
         async with stdio_client(server_params) as (read, write):
             async with ClientSession(read, write) as session:

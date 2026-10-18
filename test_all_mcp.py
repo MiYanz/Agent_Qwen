@@ -10,7 +10,9 @@ if hasattr(sys.stdout, "reconfigure"):
 
 
 async def main():
+    """启动全部 MCP Server，按 Server 输出健康状态和工具清单。"""
     async with MCPManager(CONFIG_PATH) as manager:
+        # setdefault 在首次遇到 Server 时创建列表，随后把工具归组。
         tools_by_server = {}
         for server_name, tool in await manager.get_tools():
             tools_by_server.setdefault(server_name, []).append(tool)
@@ -25,6 +27,7 @@ async def main():
                 print(f"- {tool.name}")
             print()
 
+        # 列表推导式收集所有非 healthy 状态，使测试以异常退出。
         unhealthy = [
             name
             for name, health in manager.health.get().items()

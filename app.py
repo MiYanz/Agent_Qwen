@@ -38,7 +38,7 @@ EXECUTION_INFO_MARKER = "\n\n---\n### 执行信息"
 # 最终展示时拼在回答后面；写入对话历史前会用它把执行信息剥离。
 
 
-# 先摆好五个空位，后面再往里放东西。
+# 下面五个模块级变量共同保存应用运行期间可复用的 Agent、MCP Manager 和初始化状态。
 _agent = None   # 此时没有 Agent 可用，所以用 None 表示“尚未就绪”。
 _agent_init_task = None # 保存初始化 Agent 的异步任务。
 _mcp_manager = MCPManager(CONFIG_PATH)  # 创建一个 MCP 管理器实例。
@@ -57,6 +57,7 @@ def log_event(label, detail=None):
 
 def is_port_available(host, port):
     """看端口有没有被占用"""
+    # with 是同步上下文管理器：离开代码块时会自动关闭临时 socket。
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
         try:
             probe.bind((host, port))
@@ -129,6 +130,7 @@ def ensure_ollama_ready():
 
 # async 异步的意思就是：它里面的事情可以等，不着急，可以一边等一边干别的
 async def _initialize_runtime():
+    """在当前事件循环中按需初始化 Ollama、MCP 和 LangGraph Agent。"""
     # 接下来要修改外面的 _agent 和 _agent_init_task 这两个全局变量
     global _agent, _agent_init_task
     # asyncio.to_thread 的意思是：把它丢到另一个线程去跑，别堵在这里。
@@ -160,6 +162,7 @@ async def get_agent():
             raise RuntimeError("MCP runtime finished without creating a graph")
         return _agent
     # 应用生命周期还没启动，拿到当前正在跑的事件循环
+    # MCP Session 必须在创建它的事件循环中使用，因此需要记录并比较当前 loop。
     current_loop = asyncio.get_running_loop()
 
     task_failed = (
@@ -199,6 +202,7 @@ async def _run_mcp_lifecycle(shutdown_event):
     finally:
         _runtime_ready.set()
     # 停在这里，等“关门信号”。
+    # Event.wait() 只等待信号，不会阻塞整个事件循环。
     await shutdown_event.wait()
     if _mcp_manager.started:
         await _mcp_manager.stop()
@@ -207,6 +211,7 @@ async def _run_mcp_lifecycle(shutdown_event):
 @asynccontextmanager
 async def app_lifespan(_app):
     """Own MCP resources for exactly the lifetime of the Gradio ASGI app."""
+    # @asynccontextmanager 把 yield 前后的代码分别变成异步进入和退出阶段。
     # MCP 资源由当前函数管理，其生命周期与 Gradio ASGI 应用的生命周期一致。
     # 管理 MCP 资源的生命周期
     global _agent, _agent_init_task, _runtime_ready, _runtime_error
@@ -224,6 +229,7 @@ async def app_lifespan(_app):
     )
     try:
         # 会将协程安排为一个可以与其他异步任务并发执行的 Task
+        # yield 期间 Gradio 正常处理请求；应用关闭后才会进入 finally。
         yield
     finally:
         log_event("MCP Lifecycle", "shutdown")
@@ -237,7 +243,7 @@ async def app_lifespan(_app):
 
 def _answer_only(content):
     # 从 Agent 的回复中提取真正的回答内容，去掉附加的执行信息（例如耗时、调用工具、执行轨迹）。
-    # 统一转换为字符串统一转换为字符串
+    # 统一转换为字符串，兼容模型返回的非字符串 content。
     text = content if isinstance(content, str) else str(content)
     # 分割并提取回答
     return text.split(EXECUTION_INFO_MARKER, 1)[0]
@@ -263,11 +269,13 @@ def history_to_messages(history):
             messages.append(HumanMessage(content=str(content)))
         elif role == "assistant":
             # Execution diagnostics are UI metadata, not conversation context.
+            # 页面执行信息不属于对话语义，重新送给模型前要先剥离。
             messages.append(AIMessage(content=_answer_only(content)))
     return messages
 
 
 def _clock():
+    """返回执行轨迹使用的本地时分秒。"""
     return datetime.now().strftime("%H:%M:%S")
 
 
@@ -289,7 +297,7 @@ def _tool_label(tool_name):
     return f"Unknown Tool ({tool_name})"
 
 
-def _render_progress(events, answer=None, elapsed=None, tools=None):
+def _render_progress(events, answer=None, elapsed=None, tools=None, skills=None):
     # Agent 执行状态渲染函数，主要负责将 Agent 的运行过程、最终回答、耗时和 MCP 工具调用记录整理成 Markdown 文本，显示在 Gradio 聊天界面中。
     # 同一个函数负责处理中状态和完成状态的页面渲染
     process = "\n\n".join(f"[{timestamp}]  {event}" for timestamp, event in events)
@@ -297,34 +305,41 @@ def _render_progress(events, answer=None, elapsed=None, tools=None):
         return f"### Agent 正在执行\n\n{process}"
 
     tool_text = "、".join(dict.fromkeys(tools or [])) or "未调用工具"
+    skill_text = "、".join(dict.fromkeys(skills or [])) or "未使用 Skill"
     return (
         f"{answer}{EXECUTION_INFO_MARKER}\n\n"
         f"- 模型：{MODEL_NAME}\n"
         f"- 总耗时：{elapsed:.1f}s\n"
+        f"- Skill：{skill_text}\n"
         f"- 调用工具：{tool_text}\n\n"
         f"### 执行过程\n\n{process}"
     )
 
 
 async def chat(message, history):
+    """处理一轮 Web 对话，并通过异步生成器持续返回节点级进度。"""
     # message 是用户本轮输入，history 是 Gradio 保存的聊天记录
+    # time.perf_counter() 适合测量经过时间，不受系统时钟调整影响。
     start_time = time.perf_counter()
+    # 分别保存执行事件、调用过的工具以及本轮激活的 Skill。
     events = []
     called_tools = []
+    active_skills = []
     # 定义内部日志函数
     def record(event):
         events.append((_clock(), event))
 
     log_event("Agent Start", f"input={message}")
     record("收到用户请求")
-    # 调用_render_progress()，生成 Markdown 文本，并把它交给 Gradio 展示。
+    # yield 会把当前 Markdown 交给 Gradio，同时保留函数现场以便继续执行。
     yield _render_progress(events)
-    # 进入异常处理块进入异常处理块
+    # 进入异常处理块，任一初始化、模型或工具异常都会转成页面可读信息。
     try:
         record("加载 Agent 与 MCP 工具")
         yield _render_progress(events)
         agent = await get_agent()
 
+        # 将 Gradio 历史转换为 LangChain 消息，再追加本轮用户输入。
         messages = history_to_messages(history)
         messages.append(HumanMessage(content=message))
         record("Agent 分析任务")
@@ -335,17 +350,25 @@ async def chat(message, history):
         async for update in agent.astream(
             # 传给 LangGraph 的初始 State
             {"messages": messages},
-            # updates 表示按节点输出状态更新updates 表示按节点输出状态更新
+            # updates 表示按节点输出状态更新
             # 目前实现的是节点级进度更新，不是模型逐 Token 输出
             stream_mode="updates",
         ):
             # 遍历本次节点更新
+            # 每次 update 通常包含刚执行完成的节点名称及该节点返回的状态增量。
             for node_name, node_output in update.items():
                 node_messages = node_output.get("messages", [])
                 if not isinstance(node_messages, list):
                     node_messages = [node_messages]
 
-                if node_name == "agent":
+                if node_name == "skill_detector":
+                    # 这里只展示节点实际返回的匹配结果，不根据用户文本猜测。
+                    active_skill = node_output.get("active_skill")
+                    if active_skill:
+                        active_skills.append(active_skill)
+                        record(f"匹配 Skill：{active_skill}")
+                        record(f"加载 Skill：{active_skill}")
+                elif node_name == "agent":
                     response = node_messages[-1] if node_messages else None
                     tool_calls = getattr(response, "tool_calls", None) or []
                     # 如果模型确实生成了工具调用请求，遍历所有工具调用请求。
@@ -360,6 +383,7 @@ async def chat(message, history):
                         final_answer = _answer_only(response.content)
                         record("生成最终回答")
                 elif node_name == "tools":
+                    # ToolMessage 表示工具节点已经返回消息，但内容仍可能是失败信息。
                     for tool_message in node_messages:
                         if isinstance(tool_message, ToolMessage):
                             record(f"工具返回结果（{tool_message.name}）")
@@ -371,7 +395,13 @@ async def chat(message, history):
         elapsed = time.perf_counter() - start_time
         log_event("Total Time", f"{elapsed:.2f} s")
         log_event("FINAL RESPONSE", final_answer)
-        yield _render_progress(events, final_answer, elapsed, called_tools)
+        yield _render_progress(
+            events,
+            final_answer,
+            elapsed,
+            called_tools,
+            active_skills,
+        )
     # 异常处理部分
     except Exception as exc:
         elapsed = time.perf_counter() - start_time
@@ -389,6 +419,7 @@ async def chat(message, history):
             f"Agent 运行失败：\n\n{error_text}",
             elapsed,
             called_tools,
+            active_skills,
         )
 
 
@@ -401,6 +432,7 @@ CSS = """
 
 
 with gr.Blocks() as demo:
+    # Blocks 是 Gradio 的页面容器；with 代码块中声明的组件会加入同一个页面。
     gr.Markdown(
         """
         # Local Personal Agent
@@ -409,6 +441,7 @@ with gr.Blocks() as demo:
         elem_id="hero",
     )
     gr.ChatInterface(
+        # ChatInterface 会把当前输入和历史记录传给上面的异步 chat 生成器。
         fn=chat,
         chatbot=gr.Chatbot(
             height=600,

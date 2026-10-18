@@ -9,6 +9,7 @@ from mcp_client.tools import CONFIG_PATH, load_mcp_tools
 
 
 DEFAULT_PDF = Path(r"D:\BaiduSyncdisk\Lab\02-晨会\2026.10.13.pdf")
+# 默认使用真实本地 PDF，也可以通过 --pdf 参数替换测试文件。
 
 
 if hasattr(sys.stdout, "reconfigure"):
@@ -16,9 +17,11 @@ if hasattr(sys.stdout, "reconfigure"):
 
 
 async def main(pdf_path):
+    """验证联网搜索、网页正文获取、PDF 转换和错误返回结构。"""
     async with MCPManager(CONFIG_PATH) as manager:
         tools = {tool.name: tool for tool in await load_mcp_tools(manager)}
 
+        # 同一个 Manager 连续调用多次，检查长生命周期 Session 的稳定性。
         for query in (
             "OpenAI latest news",
             "今天中国新闻",

@@ -6,12 +6,14 @@ from mcp_client.tools import CONFIG_PATH
 
 
 async def main():
+    """加载全部 LangChain 包装工具，并检查关键工具是否存在。"""
     async with MCPManager(CONFIG_PATH) as manager:
         tools = await load_mcp_tools(manager)
         await verify_tools(tools)
 
 
 async def verify_tools(tools):
+    """按 MCP Server 整理工具名称并执行发现结果断言。"""
     print("Loaded MCP Tools:")
     for tool in tools:
         server_name = (tool.metadata or {}).get("mcp_server", "unknown")

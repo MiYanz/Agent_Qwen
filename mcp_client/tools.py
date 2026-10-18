@@ -12,12 +12,14 @@ from langchain_core.tools import StructuredTool
 
 
 CONFIG_PATH = Path(__file__).with_name("config.json")
+# 配置路径相对于当前模块定位，不依赖用户从哪个目录启动程序。
 WINDOWS_PATH_PATTERN = re.compile(r"^[A-Za-z]:[\\/]")
 BINARY_DOCUMENT_SUFFIXES = {".pdf", ".docx", ".xlsx", ".pptx"}
 OFFICE_DOCUMENT_SUFFIXES = {".docx", ".xlsx", ".pptx"}
 
 
 def _safe_print(value=""):
+    """打印工具日志；终端编码不支持字符时使用转义形式兜底。"""
     text = str(value)
     encoding = sys.stdout.encoding or "utf-8"
     try:
@@ -30,7 +32,10 @@ def _safe_print(value=""):
 
 
 def _result_to_text(result):
+    """把 MCP 的文本块或 structuredContent 统一转换为字符串。"""
+    # getattr 提供默认值，兼容不同 MCP SDK 版本中可能不存在的属性。
     content = getattr(result, "content", None)
+    # 列表推导式只收集带 text 属性的内容块，图片等非文本块不会混入模型上下文。
     texts = [
         item.text
         for item in (content or [])
@@ -48,6 +53,7 @@ def _result_to_text(result):
 
 
 def _failure_payload(server_name, tool_name, error):
+    """生成所有 MCP 包装工具共用的结构化失败信息。"""
     return json.dumps(
         {
             "server": server_name,
@@ -60,6 +66,7 @@ def _failure_payload(server_name, tool_name, error):
 
 
 def _local_path_from_file_uri(uri):
+    """把 file URI 解码成本地 Path，同时兼容 UNC 网络路径。"""
     parsed = urlparse(uri)
     path = url2pathname(unquote(parsed.path))
     if parsed.netloc and parsed.netloc not in {"", "localhost"}:
@@ -68,6 +75,7 @@ def _local_path_from_file_uri(uri):
 
 
 def _normalise_document_uri(value, allowed_suffixes, tool_label):
+    """校验文档来源，并把可读的本地绝对路径转换为 file URI。"""
     if not isinstance(value, str) or not value.strip():
         raise ValueError(f"{tool_label} requires a non-empty uri")
 
@@ -91,6 +99,8 @@ def _normalise_document_uri(value, allowed_suffixes, tool_label):
 
 
 def _prepare_arguments(server_name, tool_name, arguments):
+    """在调用 MCP 前复制并校验参数，避免把二进制文档当普通文本读取。"""
+    # dict() 创建浅拷贝，包装层的路径转换不会直接修改调用方传入的字典。
     prepared = dict(arguments)
     if server_name == "filesystem" and tool_name in {
         "read_file",
@@ -124,7 +134,10 @@ def _prepare_arguments(server_name, tool_name, arguments):
 
 
 def _make_tool_coroutine(manager, server_name, tool_name):
+    """创建绑定 Manager、Server 和工具名的异步闭包。"""
+
     async def call_tool(**kwargs):
+        # **kwargs 接收 StructuredTool 按 Schema 解析后的关键字参数。
         started_at = time.perf_counter()
         _safe_print(
             f"\n[TOOL CALL] server={server_name} tool={tool_name} "
@@ -132,6 +145,7 @@ def _make_tool_coroutine(manager, server_name, tool_name):
         )
         try:
             arguments = _prepare_arguments(server_name, tool_name, kwargs)
+            # await 等待 MCP 返回；此处不会使用 asyncio.run 嵌套事件循环。
             result = await manager.call_tool(
                 tool_name, arguments, server_name=server_name
             )
@@ -146,6 +160,7 @@ def _make_tool_coroutine(manager, server_name, tool_name):
             _safe_print(
                 f"[TOOL RESULT] tool={tool_name} time={elapsed:.2f}s\n{text}"
             )
+            # 不同 SDK 版本可能使用 isError 或 is_error，因此同时兼容两种命名。
             if getattr(result, "isError", False) or getattr(
                 result, "is_error", False
             ):
@@ -163,10 +178,12 @@ def _make_tool_coroutine(manager, server_name, tool_name):
                 f"{type(exc).__name__}: {exc}",
             )
 
+    # 返回协程函数本身，稍后由 ToolNode 调用，而不是在加载阶段执行。
     return call_tool
 
 
 async def load_mcp_tools(manager):
+    """发现 MCP 工具，并将其转换成 LangChain StructuredTool。"""
     mcp_tools = await manager.get_tools()
     tools = []
     names = set()
@@ -183,6 +200,7 @@ async def load_mcp_tools(manager):
             raise ValueError(f"Duplicate MCP tool name: {name}")
         names.add(name)
 
+        # MCP SDK 不同版本的 Schema 属性命名不同，这里做兼容读取。
         schema = getattr(mcp_tool, "input_schema", None)
         if schema is None:
             schema = getattr(mcp_tool, "inputSchema", None)
@@ -213,6 +231,7 @@ async def load_mcp_tools(manager):
                 "uri argument; the wrapper converts it to a file URI."
             )
 
+        # coroutine 参数声明这是异步工具，ToolNode 会 await 它而不是同步调用。
         tools.append(
             StructuredTool.from_function(
                 coroutine=_make_tool_coroutine(

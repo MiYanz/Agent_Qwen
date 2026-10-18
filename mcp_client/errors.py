@@ -1,6 +1,6 @@
 class MCPError(Exception):
     """
-    MCP统一异常基类
+    MCP 统一异常基类，便于上层统一捕获所有 MCP 相关故障。
     """
     pass
 
@@ -8,7 +8,7 @@ class MCPError(Exception):
 
 class MCPConnectionError(MCPError):
     """
-    MCP连接失败
+    MCP 连接或整体生命周期管理失败。
     """
     pass
 
@@ -16,7 +16,7 @@ class MCPConnectionError(MCPError):
 
 class MCPToolError(MCPError):
     """
-    MCP工具执行失败
+    MCP 工具已经发起调用，但执行过程失败。
     """
     pass
 
@@ -24,6 +24,6 @@ class MCPToolError(MCPError):
 
 class MCPServerUnavailable(MCPError):
     """
-    MCP Server不可用
+    目标 MCP Server 未成功启动或当前没有可用 Session。
     """
     pass

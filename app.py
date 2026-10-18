@@ -14,6 +14,7 @@ from urllib.error import URLError
 from urllib.request import ProxyHandler, build_opener
 
 sys.dont_write_bytecode = True
+# 禁止把字节码缓存成 .pyc 文件，保持项目目录干净
 
 import gradio as gr
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
@@ -24,25 +25,38 @@ from mcp_client.tools import CONFIG_PATH
 
 
 MODEL_NAME = "Qwen3-8B"
+# 展示用模型名：主要给用户看，出现在最终回答的“执行信息”里。
+# 它不等于 Ollama 内部真正使用的模型标识。
 OLLAMA_MODEL = "qwen3:8b"
+# Ollama 实际模型标识：用于检查本地是否已安装该模型。
+# 调用 Ollama / LangChain 时通常也需要这个带 tag 的名字。
 OLLAMA_TAGS_URL = "http://127.0.0.1:11434/api/tags"
+# 本地 Ollama 的模型列表 API 地址。
+# 通过它检查 Ollama 是否启动、已安装哪些模型。
 EXECUTION_INFO_MARKER = "\n\n---\n### 执行信息"
+# 自定义分隔标记：用来把“最终回答”和“执行信息”分开。
+# 最终展示时拼在回答后面；写入对话历史前会用它把执行信息剥离。
 
-_agent = None
-_agent_init_task = None
-_mcp_manager = MCPManager(CONFIG_PATH)
-_runtime_ready = None
-_runtime_error = None
+
+# 先摆好五个空位，后面再往里放东西。
+_agent = None   # 此时没有 Agent 可用，所以用 None 表示“尚未就绪”。
+_agent_init_task = None # 保存初始化 Agent 的异步任务。
+_mcp_manager = MCPManager(CONFIG_PATH)  # 创建一个 MCP 管理器实例。
+_runtime_ready = None   # “运行时初始化完成”的信号
+_runtime_error = None   # 保存初始化过程中发生的异常
 
 
 def log_event(label, detail=None):
+    """打印日志"""
     print(f"\n[{label}]", flush=True)
+    # \n 是先空一行，免得跟上面的字挤在一起。[{label}] 就是把标题套上方括号。flush=True 意思是：立刻显示出来，不要等。
     if detail:
         print(detail, flush=True)
+        # 如果填了详细内容，就再打印一行。
 
 
 def is_port_available(host, port):
-    """Fail before ASGI startup so MCP processes are not started needlessly."""
+    """看端口有没有被占用"""
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
         try:
             probe.bind((host, port))
@@ -52,20 +66,27 @@ def is_port_available(host, port):
 
 
 def _ollama_models():
-    """Return installed Ollama models without using the system proxy."""
-    opener = build_opener(ProxyHandler({}))
+    """返回 Ollama 已安装的模型，而且不走系统代理。"""
+    opener = build_opener(ProxyHandler({})) 
+    # 代理设置是空的，不走代理。 Ollama 就在你电脑本地，走代理反而可能连不上。
+
     with opener.open(OLLAMA_TAGS_URL, timeout=2) as response:
+        # 打开网址http://127.0.0.1:11434/api/tags
         payload = json.loads(response.read().decode("utf-8"))
+        # 先按 UTF-8 解码成文字，再当成 JSON 解析。
     return {model.get("name") for model in payload.get("models", [])}
+    # 输出已安装模型
 
 
 def ensure_ollama_ready():
-    """Start Ollama when needed and wait until its local API is ready."""
+    """保证 Ollama 已经准备好，能用。"""
     try:
+        # 看 Ollama 是不是已经开着
         models = _ollama_models()
-    except (OSError, TimeoutError, URLError, json.JSONDecodeError):
+    except (OSError, TimeoutError, URLError, json.JSONDecodeError): # 问不到就报错
+        # 在系统里找找有没有叫 ollama 的程序
         executable = shutil.which("ollama")
-        if not executable:
+        if not executable:  # 去电脑默认路径碰碰运气
             local_app_data = os.environ.get("LOCALAPPDATA")
             if local_app_data:
                 candidate = (
@@ -77,16 +98,17 @@ def ensure_ollama_ready():
             raise RuntimeError(
                 "无法连接 Ollama，且未找到 ollama 可执行文件。请先安装或启动 Ollama。"
             )
-
+        # 启动 Ollama
         creation_flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
         subprocess.Popen(
-            [executable, "serve"],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            creationflags=creation_flags,
+            [executable, "serve"],          # 在命令行敲 ollama serve
+            stdout=subprocess.DEVNULL,      # 正常输出丢掉
+            stderr=subprocess.DEVNULL,      # 错误输出也丢掉
+            creationflags=creation_flags,   # Windows 下别弹黑框。
         )
-        deadline = time.monotonic() + 30
+        deadline = time.monotonic() + 30    # 从现在起，最多等 30 秒。 
         last_error = None
+        # 只要还没到 30 秒，就每隔 0.5 秒问一次 Ollama：“你好了没？”
         while time.monotonic() < deadline:
             try:
                 models = _ollama_models()
@@ -98,45 +120,57 @@ def ensure_ollama_ready():
             raise RuntimeError(
                 "Ollama 启动后 30 秒内未就绪。请运行 `ollama serve` 检查错误。"
             ) from last_error
-
+    # 看看 models 这个集合里有没有 qwen3:8b
+    # 没有的话，报错，告诉用户去敲 ollama pull qwen3:8b 把它下载下来。
     if OLLAMA_MODEL not in models:
         raise RuntimeError(
             f"Ollama 中未安装 {OLLAMA_MODEL}，请运行 `ollama pull {OLLAMA_MODEL}`。"
         )
 
-
+# async 异步的意思就是：它里面的事情可以等，不着急，可以一边等一边干别的
 async def _initialize_runtime():
+    # 接下来要修改外面的 _agent 和 _agent_init_task 这两个全局变量
     global _agent, _agent_init_task
+    # asyncio.to_thread 的意思是：把它丢到另一个线程去跑，别堵在这里。
+    # await 的意思是：我在这里等它跑完，但等的时候不占地方，别人可以干别的。
     await asyncio.to_thread(ensure_ollama_ready)
+    # 启动 MCP 工具管理器。
+    # MCP 就是各种工具，比如搜网页、看文件、开浏览器。
     await _mcp_manager.start()
+    # 先看看是不是已经造过了。造过就不重复造。
     if _agent is None:
+        # 根据 MCP 工具，造一个 LangGraph Agent。
         _agent = await create_graph(_mcp_manager)
     return _agent
 
 
 async def get_agent():
-    """Return the graph initialized by the app lifespan or initialize lazily."""
+    """返回应用生命周期里初始化好的 Agent，如果没有就懒加载一个"""
     global _agent, _agent_init_task
     if _agent is not None:
         return _agent
 
+    # 应用已经正式启动了，正在初始化或者已经初始化完
     if _runtime_ready is not None:
+        # 直接等待
         await _runtime_ready.wait()
         if _runtime_error is not None:
             raise _runtime_error
         if _agent is None:
             raise RuntimeError("MCP runtime finished without creating a graph")
         return _agent
-
+    # 应用生命周期还没启动，拿到当前正在跑的事件循环
     current_loop = asyncio.get_running_loop()
+
     task_failed = (
-        _agent_init_task is not None
+        _agent_init_task is not None    
         and _agent_init_task.done()
         and (
             _agent_init_task.cancelled()
             or _agent_init_task.exception() is not None
         )
     )
+    # 如果满足下面任意一条，就重新派一个新建agent的任务
     if (
         _agent_init_task is None
         or task_failed
@@ -150,18 +184,21 @@ async def get_agent():
 
 async def _run_mcp_lifecycle(shutdown_event):
     """Start and stop MCP resources in one long-lived asyncio task."""
+    # MCP 生命周期管理
     global _agent, _runtime_error
     try:
+        # 检查 Ollama
         log_event("Ollama", "checking http://127.0.0.1:11434")
         await asyncio.to_thread(ensure_ollama_ready)
         log_event("Ollama", f"ready ({OLLAMA_MODEL})")
         await _mcp_manager.start()
         _agent = await create_graph(_mcp_manager)
+    # 如果上面任何一步出错了，就把错误记下来
     except BaseException as exc:
         _runtime_error = exc
     finally:
         _runtime_ready.set()
-
+    # 停在这里，等“关门信号”。
     await shutdown_event.wait()
     if _mcp_manager.started:
         await _mcp_manager.stop()
@@ -170,16 +207,23 @@ async def _run_mcp_lifecycle(shutdown_event):
 @asynccontextmanager
 async def app_lifespan(_app):
     """Own MCP resources for exactly the lifetime of the Gradio ASGI app."""
+    # MCP 资源由当前函数管理，其生命周期与 Gradio ASGI 应用的生命周期一致。
+    # 管理 MCP 资源的生命周期
     global _agent, _agent_init_task, _runtime_ready, _runtime_error
+    # 日志记录
     log_event("MCP Lifecycle", "startup")
+    # Python 异步编程中的一种任务同步机制，等待直到其他协程调用_runtime_ready.set()
     _runtime_ready = asyncio.Event()
+    # 在本次应用启动时，将之前记录的运行时错误状态清空
     _runtime_error = None
     shutdown_event = asyncio.Event()
     lifecycle_task = asyncio.create_task(
+        # 调用的是你的 MCP 生命周期协程，并传入关闭事件
         _run_mcp_lifecycle(shutdown_event),
         name="mcp-lifecycle",
     )
     try:
+        # 会将协程安排为一个可以与其他异步任务并发执行的 Task
         yield
     finally:
         log_event("MCP Lifecycle", "shutdown")
@@ -192,13 +236,22 @@ async def app_lifespan(_app):
 
 
 def _answer_only(content):
+    # 从 Agent 的回复中提取真正的回答内容，去掉附加的执行信息（例如耗时、调用工具、执行轨迹）。
+    # 统一转换为字符串统一转换为字符串
     text = content if isinstance(content, str) else str(content)
+    # 分割并提取回答
     return text.split(EXECUTION_INFO_MARKER, 1)[0]
 
 
 def history_to_messages(history):
+    # 把 Gradio 保存的聊天记录转换成 LangChain 能识别的消息对象，然后传给 LangGraph，让 Qwen3-8B 能够理解之前聊过什么。
+    # 例如：history = [
+    # {"role": "user", "content": "我正在学习LangGraph"},
+    # {"role": "assistant", "content": "LangGraph是一个Agent工作流框架"}]
+    # 创建一个空列表，用于保存转换后的 LangChain 消息对象。
     messages = []
     for item in history or []:
+        # 判断当前消息是不是字典
         if isinstance(item, dict):
             role = item.get("role")
             content = item.get("content", "")
@@ -219,6 +272,7 @@ def _clock():
 
 
 def _tool_label(tool_name):
+    # 用于将 LangGraph 中实际调用的工具名称转换成用户容易理解的 MCP 服务名称
     if tool_name in {"search", "fetch_content"}:
         return "DuckDuckGo Search MCP"
     if tool_name.startswith("browser_"):
@@ -231,10 +285,13 @@ def _tool_label(tool_name):
         return "Memory MCP"
     if tool_name == "Snapshot":
         return "Computer MCP"
-    return "Filesystem MCP"
+    # return "Filesystem MCP"
+    return f"Unknown Tool ({tool_name})"
 
 
 def _render_progress(events, answer=None, elapsed=None, tools=None):
+    # Agent 执行状态渲染函数，主要负责将 Agent 的运行过程、最终回答、耗时和 MCP 工具调用记录整理成 Markdown 文本，显示在 Gradio 聊天界面中。
+    # 同一个函数负责处理中状态和完成状态的页面渲染
     process = "\n\n".join(f"[{timestamp}]  {event}" for timestamp, event in events)
     if answer is None:
         return f"### Agent 正在执行\n\n{process}"
@@ -250,17 +307,19 @@ def _render_progress(events, answer=None, elapsed=None, tools=None):
 
 
 async def chat(message, history):
+    # message 是用户本轮输入，history 是 Gradio 保存的聊天记录
     start_time = time.perf_counter()
     events = []
     called_tools = []
-
+    # 定义内部日志函数
     def record(event):
         events.append((_clock(), event))
 
     log_event("Agent Start", f"input={message}")
     record("收到用户请求")
+    # 调用_render_progress()，生成 Markdown 文本，并把它交给 Gradio 展示。
     yield _render_progress(events)
-
+    # 进入异常处理块进入异常处理块
     try:
         record("加载 Agent 与 MCP 工具")
         yield _render_progress(events)
@@ -272,10 +331,15 @@ async def chat(message, history):
         yield _render_progress(events)
 
         final_answer = ""
+        # LangGraph 流式执行
         async for update in agent.astream(
+            # 传给 LangGraph 的初始 State
             {"messages": messages},
+            # updates 表示按节点输出状态更新updates 表示按节点输出状态更新
+            # 目前实现的是节点级进度更新，不是模型逐 Token 输出
             stream_mode="updates",
         ):
+            # 遍历本次节点更新
             for node_name, node_output in update.items():
                 node_messages = node_output.get("messages", [])
                 if not isinstance(node_messages, list):
@@ -284,12 +348,14 @@ async def chat(message, history):
                 if node_name == "agent":
                     response = node_messages[-1] if node_messages else None
                     tool_calls = getattr(response, "tool_calls", None) or []
+                    # 如果模型确实生成了工具调用请求，遍历所有工具调用请求。
                     if tool_calls:
                         for call in tool_calls:
                             tool_name = call.get("name", "unknown")
                             tool_label = _tool_label(tool_name)
                             called_tools.append(tool_label)
                             record(f"调用 {tool_label}（{tool_name}）")
+                    # 如果没有工具调用，就提取回答
                     elif response is not None:
                         final_answer = _answer_only(response.content)
                         record("生成最终回答")
@@ -297,7 +363,7 @@ async def chat(message, history):
                     for tool_message in node_messages:
                         if isinstance(tool_message, ToolMessage):
                             record(f"工具返回结果（{tool_message.name}）")
-
+                # 继续更新 Gradio 页面
                 yield _render_progress(events)
 
         if not final_answer:
@@ -306,6 +372,7 @@ async def chat(message, history):
         log_event("Total Time", f"{elapsed:.2f} s")
         log_event("FINAL RESPONSE", final_answer)
         yield _render_progress(events, final_answer, elapsed, called_tools)
+    # 异常处理部分
     except Exception as exc:
         elapsed = time.perf_counter() - start_time
         log_event("Agent Error", f"{type(exc).__name__}: {exc}")

@@ -9,10 +9,10 @@ async def main():
     """加载全部 LangChain 包装工具，并检查关键工具是否存在。"""
     async with MCPManager(CONFIG_PATH) as manager:
         tools = await load_mcp_tools(manager)
-        await verify_tools(tools)
+        await verify_tools(tools, manager)
 
 
-async def verify_tools(tools):
+async def verify_tools(tools, manager):
     """按 MCP Server 整理工具名称并执行发现结果断言。"""
     print("Loaded MCP Tools:")
     for tool in tools:
@@ -31,8 +31,14 @@ async def verify_tools(tools):
     assert "pdf_convert_to_markdown" in tools_by_server["pdf"]
     assert "office_convert_to_markdown" in tools_by_server["office"]
     assert "office_create_docx" in tools_by_server["office-writer"]
-    assert "search_nodes" in tools_by_server["memory"]
-    assert "add_observations" in tools_by_server["memory"]
+    # Memory MCP 由 MemoryManager 统一访问，不应绕过记忆策略暴露给通用 ToolNode。
+    assert "memory" not in tools_by_server
+    manager_memory_tools = {
+        tool.name
+        for server_name, tool in await manager.get_tools()
+        if server_name == "memory"
+    }
+    assert {"create_entities", "add_observations", "search_nodes"} <= manager_memory_tools
     assert tools_by_server["computer"] == {"Snapshot"}
 
 

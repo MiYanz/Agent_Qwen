@@ -189,6 +189,10 @@ async def load_mcp_tools(manager):
     names = set()
 
     for server_name, mcp_tool in mcp_tools:
+        # Memory MCP 由 MemoryManager 统一调用，避免模型绕过去重、敏感信息和删除确认策略。
+        # Server 仍由 MCPManager 启动并保持连接，只是不作为通用 Tool 暴露给 LLM。
+        if server_name == "memory":
+            continue
         config = manager.servers[server_name]
         included = config.get("includeTools")
         if included and mcp_tool.name not in included:

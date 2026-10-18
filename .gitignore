@@ -30,6 +30,8 @@ mcp_servers/node_modules/
 # Runtime output and local user data
 workspace/
 memory/*.jsonl
+memory/*.sqlite3
+memory/*.sqlite3-*
 
 # Local secrets
 .env

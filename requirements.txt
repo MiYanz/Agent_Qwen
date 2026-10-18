@@ -1,0 +1,7 @@
+# Agent 核心运行依赖；Node MCP Server 依赖由 mcp_servers/package.json 管理。
+gradio==6.30.0
+langchain-core==1.6.10
+langchain-ollama==1.1.0
+langgraph==1.2.15
+langgraph-checkpoint-sqlite==3.1.2
+mcp==2.3.0

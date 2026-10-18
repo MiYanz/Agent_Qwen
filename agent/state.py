@@ -9,6 +9,9 @@ from langgraph.graph.message import add_messages
 # file_route：保存文件路由信息，具体含义需要结合 nodes.py 和 graph.py 中对它的赋值与读取来确定。
 # active_skill：保存本轮匹配到的 Skill 名称；没有匹配时为空字符串。
 # skill_instruction：仅保存已匹配 Skill 的完整说明，不会一次加载全部 Skill 正文。
+# memory_context：保存本轮检索出的少量相关长期记忆，只作为模型的辅助数据。
+# memory_status：记录本轮检索或自动更新状态，供日志展示，不包含敏感内容。
+# memory_direct_response：显式查看、保存、修改和删除记忆时的可信操作结果。
 
 class AgentState(TypedDict, total=False):
     # 用于描述一个字典应该具备怎样的结构
@@ -23,3 +26,6 @@ class AgentState(TypedDict, total=False):
     # active_skill 和 skill_instruction 由 skill_detector 写入，供 Agent 节点读取。
     active_skill: str
     skill_instruction: str
+    memory_context: str
+    memory_status: str
+    memory_direct_response: str

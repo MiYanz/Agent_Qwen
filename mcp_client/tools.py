@@ -1,3 +1,6 @@
+把 MCP Server 提供的原始工具包装成 LangChain 能够识别和调用的工具，同时负责参数检查、结果转换和异常处理。
+
+
 import json
 import os
 import re
@@ -19,7 +22,7 @@ OFFICE_DOCUMENT_SUFFIXES = {".docx", ".xlsx", ".pptx"}
 
 
 def _safe_print(value=""):
-    """打印工具日志；终端编码不支持字符时使用转义形式兜底。"""
+    """安全地打印日志，尽可能保证日志能够正常输出，避免因为终端编码问题导致程序报错。"""
     text = str(value)
     encoding = sys.stdout.encoding or "utf-8"
     try:
@@ -32,7 +35,7 @@ def _safe_print(value=""):
 
 
 def _result_to_text(result):
-    """把 MCP 的文本块或 structuredContent 统一转换为字符串。"""
+    """把 MCP 返回的不同形式的数据统一转换成字符串，让大模型能够读取。"""
     # getattr 提供默认值，兼容不同 MCP SDK 版本中可能不存在的属性。
     content = getattr(result, "content", None)
     # 列表推导式只收集带 text 属性的内容块，图片等非文本块不会混入模型上下文。
@@ -53,7 +56,7 @@ def _result_to_text(result):
 
 
 def _failure_payload(server_name, tool_name, error):
-    """生成所有 MCP 包装工具共用的结构化失败信息。"""
+    """统一生成失败结果，当工具执行失败时，将错误整理成统一的 JSON 字符串。"""
     return json.dumps(
         {
             "server": server_name,
@@ -66,7 +69,7 @@ def _failure_payload(server_name, tool_name, error):
 
 
 def _local_path_from_file_uri(uri):
-    """把 file URI 解码成本地 Path，同时兼容 UNC 网络路径。"""
+    """将文件 URI 转换成 Python 可以使用的本地路径，并兼容 UNC 网络路径。"""
     parsed = urlparse(uri)
     path = url2pathname(unquote(parsed.path))
     if parsed.netloc and parsed.netloc not in {"", "localhost"}:
@@ -75,7 +78,7 @@ def _local_path_from_file_uri(uri):
 
 
 def _normalise_document_uri(value, allowed_suffixes, tool_label):
-    """校验文档来源，并把可读的本地绝对路径转换为 file URI。"""
+    """检查传入的文档地址是否合法；如果是本地文件路径，就验证文件后将它转换成 file:// URI。"""
     if not isinstance(value, str) or not value.strip():
         raise ValueError(f"{tool_label} requires a non-empty uri")
 
@@ -99,7 +102,7 @@ def _normalise_document_uri(value, allowed_suffixes, tool_label):
 
 
 def _prepare_arguments(server_name, tool_name, arguments):
-    """在调用 MCP 前复制并校验参数，避免把二进制文档当普通文本读取。"""
+    """根据当前要调用的 MCP Server 和工具，对参数进行必要的校验和转换。"""
     # dict() 创建浅拷贝，包装层的路径转换不会直接修改调用方传入的字典。
     prepared = dict(arguments)
     if server_name == "filesystem" and tool_name in {
@@ -134,7 +137,7 @@ def _prepare_arguments(server_name, tool_name, arguments):
 
 
 def _make_tool_coroutine(manager, server_name, tool_name):
-    """创建绑定 Manager、Server 和工具名的异步闭包。"""
+    """为某个 MCP 工具创建调用函数，LangChain 需要一个可执行的函数来代表每个工具，而项目可能有几十个不同的 MCP 工具。如果每个工具都手写一份调用代码，会非常冗余。"""
 
     async def call_tool(**kwargs):
         # **kwargs 接收 StructuredTool 按 Schema 解析后的关键字参数。
@@ -183,7 +186,7 @@ def _make_tool_coroutine(manager, server_name, tool_name):
 
 
 async def load_mcp_tools(manager):
-    """发现 MCP 工具，并将其转换成 LangChain StructuredTool。"""
+    """发现并加载所有可用工具"""
     mcp_tools = await manager.get_tools()
     tools = []
     names = set()

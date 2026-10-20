@@ -21,12 +21,14 @@ class SkillInfo:
 class SkillLoader:
     """发现并按需读取项目 skills 目录中的 SKILL.md。"""
 
+    # 告诉程序去哪里寻找 Skill，并准备一个字典保存发现的 Skill。
     def __init__(self, skills_dir):
         # resolve() 转成绝对路径，后续可以可靠判断 SKILL.md 是否仍位于该目录内。
         self.skills_dir = Path(skills_dir).resolve()
         # 字典以 Skill name 为键，可以直接检查重名并按名称加载。
         self._skills = {}
 
+    # 扫描 skills 目录下的直接子目录，寻找其中的 SKILL.md 文件。
     def discover(self):
         """扫描直接子目录；单个 Skill 损坏不会影响其他 Skill。"""
         discovered = {}
@@ -70,6 +72,7 @@ class SkillLoader:
         self._skills = discovered
         return list(discovered.values())
 
+    # 从 SKILL.md 中提取 Skill 的名称、描述等元数据。
     @staticmethod
     def _parse_frontmatter(text):
         """解析仅包含简单 key: value 的 YAML 风格头部，不引入新依赖。"""
@@ -97,6 +100,7 @@ class SkillLoader:
             metadata[key.strip()] = value.strip().strip("\"'")
         return metadata
 
+    # 把已经发现的 Skill 整理成一份精简目录，供大模型判断当前任务适合哪个 Skill。
     def catalog(self):
         """返回供模型选择的精简目录，不包含 Skill 正文。"""
         # 列表推导式只暴露名称和描述，避免每轮把全部操作说明放进上下文。
@@ -105,6 +109,7 @@ class SkillLoader:
             for skill in self._skills.values()
         ]
 
+    # 读取指定 Skill 的完整内容
     def load(self, name):
         """只允许读取已经发现且仍位于 skills 根目录内的文件。"""
         skill = self._skills.get(name)

@@ -16,9 +16,8 @@ from mcp_client.tools import load_mcp_tools
 from memory.manager import MemoryManager
 from skills.loader import SkillLoader
 
-
+# 确定项目中 skills 文件夹的绝对路径。
 SKILLS_DIR = Path(__file__).resolve().parents[1] / "skills"
-# 根据 graph.py 的绝对位置计算项目 skills 目录，避免依赖启动命令的当前目录。
 
 
 def _route_after_memory(state):
@@ -28,10 +27,11 @@ def _route_after_memory(state):
 
 async def create_graph(mcp_manager, memory_manager=None, checkpointer=None):
     """加载工具和 Skill，并编译出可异步调用的 LangGraph Agent。"""
-    # await 会暂停当前协程，直到 Manager 完成启动；等待期间事件循环仍可处理其他任务。
+    # 启动 MCP 管理器
     await mcp_manager.start()
-    # 这里拿到的是已经绑定到长生命周期 MCPManager 的 LangChain 工具。
+    # 加载可供 Agent 使用的工具
     tools = await load_mcp_tools(mcp_manager)
+
     # 启动时只发现 Skill 元数据；完整 SKILL.md 由 skill_detector 按需读取。
     skill_loader = SkillLoader(SKILLS_DIR)
     skill_loader.discover()
@@ -47,15 +47,21 @@ async def create_graph(mcp_manager, memory_manager=None, checkpointer=None):
     graph.add_node("agent", create_chat_node(tools))
     graph.add_node("tools", ToolNode(tools))
     graph.add_node("memory_update", create_memory_update_node(memory_manager))
+
+    # 每次正常启动这张图时，从 file_detector 开始执行。
     graph.set_entry_point("file_detector")
-    graph.add_edge("file_detector", "memory")
-    graph.add_conditional_edges(
+
+    # 普通边可以理解为一条固定的流程规则
+    graph.add_edge("file_detector", "memory")   # 文件检测完成后进入记忆节点。
+    graph.add_conditional_edges(    
         "memory",
         _route_after_memory,
         {"memory_reply": "memory_reply", "skill_detector": "skill_detector"},
     )
     graph.add_edge("memory_reply", END)
-    graph.add_edge("skill_detector", "agent")
+    graph.add_edge("skill_detector", "agent")   # Skill 选择完成后进入主 Agent。
+    
+    # 条件边
     # tools_condition 检查最新 AIMessage 是否包含 tool_calls：
     # 有工具请求时进入 ToolNode，否则结束本轮图执行。
     graph.add_conditional_edges(
@@ -63,6 +69,7 @@ async def create_graph(mcp_manager, memory_manager=None, checkpointer=None):
         tools_condition,
         {"tools": "tools", END: "memory_update"},
     )
+    
     # 工具结果以 ToolMessage 写回 State 后必须回到 Agent，让模型生成最终回答。
     graph.add_edge("tools", "agent")
     graph.add_edge("memory_update", END)

@@ -89,14 +89,16 @@ def _bounded_messages(messages, max_messages=30, max_chars=24000):
 
 def create_memory_node(memory_manager):
     """创建长期记忆节点：先处理显式命令，否则检索本轮相关记忆。"""
-
+    # 在回答前读取记忆
     async def memory_node(state):
+        # 提取用户当前的问题
         query = _latest_human_text(state.get("messages", [])).strip()
         print("[Memory Retrieval] start", flush=True)
         human_count = sum(
             isinstance(message, HumanMessage)
             for message in state.get("messages", [])
         )
+        # if 用户正在引用前文 and 当前消息中缺少足够的历史:提示用户补充上下文
         if SHORT_TERM_REFERENCE_PATTERN.search(query) and human_count < 2:
             return {
                 "memory_context": "",
@@ -106,6 +108,7 @@ def create_memory_node(memory_manager):
                     "或使用原来的会话 ID 恢复历史会话。"
                 ),
             }
+        # handle_command(query) 尝试判断用户当前输入是不是一个明确的记忆管理命令
         operation = await memory_manager.handle_command(query)
         if operation.handled:
             print(
@@ -118,7 +121,7 @@ def create_memory_node(memory_manager):
                 "memory_status": f"command:{operation.action}",
                 "memory_direct_response": operation.response,
             }
-
+        # 如果不是命令，就检索相关长期记忆
         try:
             records = await memory_manager.retrieve_memories(query)
             print(f"[Memory Retrieval] found={len(records)}", flush=True)
@@ -146,9 +149,12 @@ async def memory_reply(state):
 
 def create_memory_update_node(memory_manager):
     """创建回答后自动记忆节点；只处理保守策略选中的稳定信息。"""
-
+    # 嵌套函数的目的，是把“创建节点时就确定的东西”（memory_manager）和“每次执行时才变化的东西”（state）分开。
+    # 在回答后尝试自动提取并更新长期记忆
     async def memory_update(state):
+        # 从状态中提取最近一条用户消息
         user_text = _latest_human_text(state.get("messages", []))
+        # 把用户刚才说的话交给 process_automatic_memory()，由记忆管理器判断是否需要自动保存或更新长期记忆。
         status = await memory_manager.process_automatic_memory(user_text)
         return {"memory_status": f"automatic:{status}"}
 
@@ -156,7 +162,7 @@ def create_memory_update_node(memory_manager):
 
 
 async def detect_file_route(state):
-    """Classify local document paths so binary files use document tools."""
+    """从用户当前的消息中识别 Windows 本地文件路径，根据文件扩展名判断应该将请求交给哪一类工具处理，并把判断结果交给 LangGraph 工作流。"""
     # 虽然当前函数没有 await，但保留 async 形式便于作为 LangGraph 异步节点统一调度。
     text = _latest_human_text(state.get("messages", []))
     match = WINDOWS_FILE_PATTERN.search(text)
@@ -169,7 +175,7 @@ async def detect_file_route(state):
 
 
 def create_skill_node(skill_loader):
-    """创建 Skill 选择节点：先看精简目录，匹配后才读取完整正文。"""
+    """创建 Skill 选择节点：先用简单规则匹配一部分明确的任务，再让大模型选择其他任务所需的 Skill；确定 Skill 后，才读取它的完整指令。"""
 
     async def detect_skill(state):
         # 内部函数会捕获外层 skill_loader，这种写法称为闭包。
@@ -178,8 +184,7 @@ def create_skill_node(skill_loader):
         catalog = skill_loader.catalog()
         selected = None
 
-        # 明确文件类型和新闻任务优先走稳定匹配；其他任务交给模型根据
-        # name/description 判断，从而避免把全部 SKILL.md 塞入每轮 Prompt。
+        # 明确文件类型和新闻任务优先走稳定匹配；其他任务交给模型根据 name/description 判断，从而避免把全部 SKILL.md 塞入每轮 Prompt。
         # 集合推导式生成可用名称集合，后续成员判断的开销较低。
         available = {item["name"] for item in catalog}
         if (
@@ -191,6 +196,7 @@ def create_skill_node(skill_loader):
         elif "news-search" in available and NEWS_TASK_PATTERN.search(query):
             selected = "news-search"
         elif catalog and query:
+            # 如果前面两类 Skill 都未命中，则将 Skill 目录整理成文本发给大模型让其自行判断
             catalog_text = "\n".join(
                 f'- {item["name"]}: {item["description"]}'
                 for item in catalog
@@ -198,6 +204,7 @@ def create_skill_node(skill_loader):
             # ainvoke 是模型的异步调用接口；这里仅传入精简目录，不加载全部 Skill 正文。
             decision = await llm.ainvoke(
                 [
+                    # 规定模型如何做选择，以及输出格式。
                     SystemMessage(
                         content=(
                             "根据用户任务从 Skill 目录中选择一个明确适用的 Skill。"
@@ -205,6 +212,7 @@ def create_skill_node(skill_loader):
                             "名称。不要因为词语相似就勉强匹配。"
                         )
                     ),
+                    # 提供当前文件路由、用户任务和 Skill 目录。
                     HumanMessage(
                         content=(
                             f"文件路由：{state.get('file_route', 'general')}\n"
@@ -213,6 +221,7 @@ def create_skill_node(skill_loader):
                     ),
                 ]
             )
+            # 因为大模型可能返回不存在的 Skill 名称，或者输出额外解释。
             # 只接受模型输出第一行且必须与已发现名称完全一致，其他输出一律视为未匹配。
             candidate = str(decision.content or "").strip().splitlines()[0]
             if candidate in available:
@@ -254,16 +263,13 @@ def _route_instruction(route):
 
 
 def _explicit_search_call(state):
-    """Create a real tool call for an explicit web-search request.
-
-    This only handles the user's requested operation (search), not a topic.
-    Local file-search wording remains available to the Filesystem tools.
-    """
+    """当用户明确要求联网搜索时，程序主动构造一个 search 工具调用请求，让 Agent 工作流执行搜索，而不是完全依赖大模型自行判断是否调用搜索工具。"""
     if state.get("file_route", "general") != "general":
         return None
     if any(isinstance(message, ToolMessage) for message in state["messages"]):
         return None
     query = _latest_human_text(state["messages"]).strip()
+    # 如果用户消息为空，返回 None。如果用户消息没有匹配显式联网搜索的正则表达式，也返回 None。
     if not query or not EXPLICIT_WEB_SEARCH_PATTERN.search(query):
         return None
     if LOCAL_RESOURCE_PATTERN.search(query):
@@ -272,19 +278,19 @@ def _explicit_search_call(state):
     return AIMessage(
         content="",
         tool_calls=[
-            {
-                "name": "search",
-                "args": {"query": query, "max_results": 10},
-                "id": f"explicit-search-{uuid4().hex}",
-                "type": "tool_call",
+            {   
+                "name": "search",   # 指定要调用的工具名称
+                "args": {"query": query, "max_results": 10},    # 提供给工具的参数
+                "id": f"explicit-search-{uuid4().hex}",     # 为这次工具调用生成唯一标识
+                "type": "tool_call",    # 标明这是一个工具调用请求
             }
         ],
     )
 
 
 def _search_followup(messages, preferred_url=None):
-    """Turn a search result into one content-fetch call."""
-    # next(..., None) 配合生成器表达式，只取最近一条 search ToolMessage。
+    """从搜索结果中选择一个网页，准备读取正文。"""
+    # next(..., None) 配合生成器表达式，找到最近一次搜索工具的返回结果。
     result = next(
         (
             message
@@ -295,8 +301,10 @@ def _search_followup(messages, preferred_url=None):
     )
     if result is None:
         return None
+    # 从搜索结果中提取 URL
     urls = SEARCH_URL_PATTERN.findall(str(result.content or ""))
     # 集合推导式收集已访问 URL，防止搜索回路重复读取同一网页。
+    # 假设搜索结果中有 3 个网页，而 Agent 已经读取过第一个网页。如果后续又拿到同样的搜索结果，就不应该反复读取同一个网页，否则会造成重复调用。
     fetched_urls = {
         str(call.get("args", {}).get("url", ""))
         for message in messages
@@ -304,6 +312,7 @@ def _search_followup(messages, preferred_url=None):
         for call in (message.tool_calls or [])
         if call.get("name") == "fetch_content"
     }
+    # 从搜索结果中筛选出尚未发起过读取调用的 URL
     available_urls = [url for url in urls if url not in fetched_urls]
     if not available_urls:
         return None
@@ -312,6 +321,7 @@ def _search_followup(messages, preferred_url=None):
         if preferred_url in available_urls
         else available_urls[0]
     )
+    # 请调用 fetch_content 工具，读取这个 URL 对应的网页内容。
     return AIMessage(
         content="",
         tool_calls=[
@@ -324,7 +334,7 @@ def _search_followup(messages, preferred_url=None):
         ],
     )
 
-
+# 创建一个本地大语言模型客户端，供后续代码调用。
 llm = ChatOllama(
     model="qwen3:8b",
     base_url="http://127.0.0.1:11434",
@@ -340,15 +350,18 @@ llm = ChatOllama(
 
 
 def create_chat_node(tools):
-    """创建主推理节点，并把当前 MCP 工具定义提供给模型。"""
-    # bind_tools 只把名称、描述和参数 Schema 提供给模型，不会立即执行任何工具。
+    """创建主推理节点，接收当前工作流状态，组织模型需要的上下文，判断是否需要调用工具，处理搜索和网页读取结果，最后返回下一步操作或最终回答。"""
+
+    # 不是立即执行工具，而是将工具的名称、描述和参数 Schema 提供给大模型，使模型能够生成符合工具接口的调用请求。
     llm_with_tools = llm.bind_tools(tools)
 
     async def chat_node(state):
         # 主节点同样是闭包，会复用外层已经绑定工具的模型对象。
+        # 记录开始时间
         started_at = time.perf_counter()
         print("\n[AGENT NODE START]", flush=True)
 
+        # 判断用户是否明确要求联网搜索
         explicit_search = _explicit_search_call(state)
         if explicit_search:
             print("[TOOL DECISION] explicit web search -> search", flush=True)
@@ -357,13 +370,14 @@ def create_chat_node(tools):
 
         print("[LLM REQUEST]", flush=True)
 
+        # 创建一个新的消息列表 messages，放入系统提示词，并把当前日期填入 SYSTEM_PROMPT。
         messages = [
             SystemMessage(
                 content=SYSTEM_PROMPT.format(today=date.today().isoformat())
             )
         ]
-        # Skill 是本轮任务的操作说明，不替代 MCP 工具；只有匹配成功后
-        # skill_detector 才会把完整内容放入 State。
+        # 代码依次加入 Skill 指令、文件路由指令、长期记忆和对话历史。
+        # Skill 是本轮任务的操作说明，不替代 MCP 工具；只有匹配成功后 skill_detector 才会把完整内容放入 State。
         skill_instruction = state.get("skill_instruction", "").strip()
         if skill_instruction:
             messages.append(
@@ -382,7 +396,7 @@ def create_chat_node(tools):
         memory_context = state.get("memory_context", "").strip()
         if memory_context:
             messages.append(SystemMessage(content=memory_context))
-        # Checkpointer 保存完整状态；模型只接收最近窗口，防止会话无限增长挤占上下文。
+        # 加入对话历史，但只放最近的30条，防止会话无限增长挤占上下文。
         messages.extend(_bounded_messages(state["messages"]))
 
         # 列表推导式提取历史中的全部 ToolMessage，最后一个代表最近工具结果。
@@ -394,10 +408,12 @@ def create_chat_node(tools):
         latest_tool = tool_messages[-1] if tool_messages else None
         fetched_page = False
         if latest_tool:
+            # 如果最近的工具是 search
             if latest_tool.name == "search":
+                # 获取用户问题和搜索结果
                 question = _latest_human_text(state["messages"])
                 search_text = str(latest_tool.content or "")[:12000]
-                # 此处使用未绑定工具的 llm，只让模型在候选 URL 中做选择。
+                # 此处使用未绑定工具的 llm，只是让模型选择候选来源，并没有读取网页正文。
                 selection = await llm.ainvoke(
                     [
                         SystemMessage(
@@ -416,13 +432,16 @@ def create_chat_node(tools):
                         ),
                     ]
                 )
+                # 从模型输出中提取 URL
                 selected = re.search(
                     r"https?://[^\s<>\"']+", str(selection.content or "")
                 )
+                # 构造一个 fetch_content 工具调用请求。
                 followup = _search_followup(
                     state["messages"],
                     selected.group(0).rstrip(".,，。") if selected else None,
                 )
+                # 让工作流去执行网页读取
                 if followup:
                     print("[SEARCH FOLLOW-UP] selected source", flush=True)
                     response = followup
@@ -433,10 +452,13 @@ def create_chat_node(tools):
                     )
                     return {"messages": [response]}
                 instruction = "搜索没有返回可读取的 URL，请说明无法取得来源。"
+            # 如果最近的工具是 fetch_content
             else:
                 fetched_page = latest_tool.name == "fetch_content"
                 page_text = str(latest_tool.content or "").strip()
+                # 正文至少有 200 个字符，才将其视为进入网页正文评估流程的候选内容。
                 fetched_page = fetched_page and len(page_text) >= 200
+                # 让模型判断网页是否包含足够的证据
                 if fetched_page:
                     question = _latest_human_text(state["messages"])
                     # 先判断正文证据是否足够，避免把新闻首页或无关教程直接交给最终总结。
@@ -461,6 +483,7 @@ def create_chat_node(tools):
                         str(check.content or "").strip().upper()
                         == "SUFFICIENT"
                     )
+                    # 如果网页不够用
                     if not fetched_page:
                         # sum() 对满足条件的 ToolMessage 计数，为换源次数设置上限。
                         fetch_count = sum(
@@ -471,6 +494,7 @@ def create_chat_node(tools):
                         )
                         followup = None
                         if fetch_count < 5:
+                            # 从后往前找原始搜索结果，因为当前网页可能不足以回答问题，系统需要从其他候选网页中继续寻找证据。
                             search_result = next(
                                 (
                                     message
@@ -480,7 +504,7 @@ def create_chat_node(tools):
                                 ),
                                 None,
                             )
-                            # 从历史 AIMessage 的结构化工具请求中恢复已经尝试过的 URL。
+                            # 记录已经尝试过的 URL。
                             used_urls = [
                                 str(call.get("args", {}).get("url", ""))
                                 for message in state["messages"]
@@ -488,11 +512,15 @@ def create_chat_node(tools):
                                 for call in (message.tool_calls or [])
                                 if call.get("name") == "fetch_content"
                             ]
+                            # 构造新的候选来源列表
+                            # 这里把两类信息拼接在一起：第一类是之前搜索工具返回的候选结果。第二类是当前网页正文中出现的 URL。
                             candidate_text = (
                                 (str(search_result.content) if search_result else "")
                                 + "\n\n当前网页中出现的链接：\n"
                                 + "\n".join(ANY_URL_PATTERN.findall(page_text))
                             )
+                            # 让模型从这些候选来源中选择另一个最有可能回答问题的网页
+                            # 这里仍然使用未绑定工具的 llm，因为模型只负责选择 URL，不负责直接读取网页。
                             retry_selection = await llm.ainvoke(
                                 [
                                     SystemMessage(
@@ -513,6 +541,7 @@ def create_chat_node(tools):
                                     ),
                                 ]
                             )
+                            # 从模型输出中提取 URL
                             retry_url = re.search(
                                 r"https?://[^\s<>\"']+",
                                 str(retry_selection.content or ""),
@@ -527,6 +556,10 @@ def create_chat_node(tools):
                                 url.rstrip(".,，。)")
                                 for url in ANY_URL_PATTERN.findall(candidate_text)
                             }
+                            # 三重检查：
+                            # 模型确实提取出了 URL。
+                            # 这个 URL 必须真实出现在候选文本中。
+                            # 这个 URL 之前没有被尝试过。
                             if (
                                 selected_url
                                 and selected_url in allowed_urls
@@ -546,8 +579,11 @@ def create_chat_node(tools):
                                         }
                                     ],
                                 )
+                            # 如果模型没有选出合法的新 URL，会从原始搜索结果中寻找第一个尚未尝试读取的 URL。
                             else:
                                 followup = _search_followup(state["messages"])
+                        # 成功找到新来源
+                        # 返回新的 fetch_content 工具调用请求，等待工作流执行。
                         if followup:
                             print(
                                 "[SEARCH FOLLOW-UP] source insufficient; "
@@ -563,6 +599,7 @@ def create_chat_node(tools):
                 )
             messages.append(SystemMessage(content=instruction))
 
+        # 进入网页正文总结流程
         if fetched_page:
             question = _latest_human_text(state["messages"])
             evidence = str(latest_tool.content)[:12000]
@@ -583,13 +620,14 @@ def create_chat_node(tools):
         else:
             # 没有足够正文时由绑定工具的模型决定回答或生成下一次 tool_calls。
             response = await llm_with_tools.ainvoke(messages)
-
+        # 针对一种特殊情况：最近的工具返回的是搜索结果，但模型没有生成新的工具调用针对一种特殊情况：最近的工具返回的是搜索结果，但模型没有生成新的工具调用
         if latest_tool and latest_tool.name == "search" and not response.tool_calls:
             followup = _search_followup(state["messages"])
             if followup:
                 print("[SEARCH FOLLOW-UP] fallback to first URL", flush=True)
                 response = followup
         elapsed = time.perf_counter() - started_at
+        # 返回消息状态更新
         print(
             f"[LLM RESPONSE] time={elapsed:.2f}s "
             f"tool_calls={len(response.tool_calls or [])}",

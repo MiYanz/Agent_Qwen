@@ -1,3 +1,5 @@
+# 全部 MCP 服务的启动诊断：按服务打印发现工具和健康状态。
+# 它验证启动与发现，不代表每个工具都执行成功；结束时由管理器上下文统一关闭资源。
 import asyncio
 import sys
 
@@ -9,6 +11,8 @@ if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(errors="backslashreplace")
 
 
+# 真实启动所有配置服务并按服务分组工具；有任一 unhealthy 状态就抛错。
+# 工具数量和健康状态来自实际发现，不会主动执行截图、写文件等具体能力。
 async def main():
     """启动全部 MCP Server，按 Server 输出健康状态和工具清单。"""
     async with MCPManager(CONFIG_PATH) as manager:

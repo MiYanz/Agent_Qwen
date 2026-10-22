@@ -1,3 +1,5 @@
+# 主图与子图使用的状态字段声明。
+# TypedDict 描述字典结构；字段如何合并由 LangGraph 读取的 reducer 决定，并非普通类型检查自动完成。
 from typing import Annotated, TypedDict
 
 from langgraph.graph.message import add_messages
@@ -13,6 +15,8 @@ from langgraph.graph.message import add_messages
 # memory_status：记录本轮检索或自动更新状态，供日志展示，不包含敏感内容。
 # memory_direct_response：显式查看、保存、修改和删除记忆时的可信操作结果。
 
+# 各节点只需要返回自己改变的字段，不必重复构造全部状态。
+# total=False 表示输入允许缺省字段；消息用追加合并，普通标量字段按最新更新覆盖。
 class AgentState(TypedDict, total=False):
     # 用于描述一个字典应该具备怎样的结构
     # total=False允许你不提供某些键，适合节点逐步补充状态。
@@ -29,3 +33,12 @@ class AgentState(TypedDict, total=False):
     memory_context: str
     memory_status: str
     memory_direct_response: str
+    # 本轮委托预算随主会话持久化，在请求入口重置，不使用跨会话全局计数。
+    # 计数是本轮请求的状态，不是整个服务的总使用量；file_detector 每轮会重置它。
+    delegation_count: int
+    # 保存任务内容指纹及显式任务 ID 的使用情况；键是摘要，避免把任务原文当索引保存。
+    delegation_seen: dict[str, int]
+    # 每次用户请求生成新主运行 ID，专业任务通过 parent_run_id 与这一轮建立关联。
+    main_run_id: str
+    # 当前节点产生的结构化诊断事件；不使用 add_messages，不进入对话正文。
+    agent_events: list[dict]

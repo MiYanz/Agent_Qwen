@@ -1,3 +1,5 @@
+# 本项目维护的文档写入 MCP 服务；把 create_docx 注册为可发现工具。
+# 它会创建目录并写入指定 DOCX，和 File 子 Agent 使用的只读文档解析工具不是同一个服务。
 from pathlib import Path
 from zipfile import BadZipFile, ZipFile
 
@@ -15,6 +17,8 @@ server = MCPServer(
 # MCPServer 保存工具注册信息，并通过 stdio 与 MCP Client 交换请求和响应。
 
 
+# 接收模型传入的输出路径，检查绝对路径及 .docx 扩展名，并创建父目录。
+# 注意 mkdir 是实际副作用；此函数不是单纯的字符串检查，也没有执行文件覆盖确认。
 def _validated_output_path(output_path: str) -> Path:
     """校验 DOCX 输出路径，并确保目标父目录存在。"""
     path = Path(output_path).expanduser()
@@ -26,6 +30,8 @@ def _validated_output_path(output_path: str) -> Path:
     return path
 
 
+# 输入已保存的 Path；检查 ZIP 完整性和必要成员，再用 python-docx 重读。
+# 失败时抛异常，不会把“保存成功”当作文档格式已验证。
 def _verify_docx(path: Path) -> None:
     """同时从 ZIP 包结构和 python-docx 解析两个层面验证生成文件。"""
     try:
@@ -48,6 +54,8 @@ def _verify_docx(path: Path) -> None:
     Document(path)
 
 
+# output_path/title 必填，其余列表可省略；逐项建立文档，保存并验证后返回路径说明。
+# 该工具会真实写文件，已有同名文件可能被覆盖，因此没有列入 File 子 Agent 白名单。
 @server.tool(
     description=(
         "Create a real Microsoft Word DOCX document with a title, paragraphs, "
@@ -67,6 +75,7 @@ def create_docx(
     document = Document()
     document.add_heading(title, level=0)
 
+    # 可选列表为 None 时按空列表处理；不同循环分别使用正文、有序和无序样式，而不是拼成一段纯文本。
     for paragraph in paragraphs or []:
         document.add_paragraph(paragraph)
     for item in numbered_list or []:

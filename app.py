@@ -1,3 +1,5 @@
+# 应用入口：连接 Gradio 页面、Ollama、主图和持久化资源。
+# 阅读时可沿 chat → get_agent → create_graph 追踪请求；页面诊断信息与真正对话内容分开处理。
 import asyncio
 import json
 import os
@@ -48,11 +50,13 @@ _agent = None   # 此时没有 Agent 可用，所以用 None 表示“尚未就�
 _agent_init_task = None # 保存初始化 Agent 的异步任务。
 _mcp_manager = MCPManager(CONFIG_PATH)  # 创建一个 MCP 管理器实例。
 _memory_manager = MemoryManager(_mcp_manager)
+# 这些值在模块导入时只是占位；数据库连接和就绪事件由应用生命周期建立。
 _checkpointer = None
 _runtime_ready = None   # “运行时初始化完成”的信号
 _runtime_error = None   # 保存初始化过程中发生的异常
 
 
+# label 是日志类别，detail 是可选详情；输出直接写终端，不会写入 LangGraph 消息状态。
 def log_event(label, detail=None):
     """打印日志"""
     print(f"\n[{label}]", flush=True)
@@ -62,6 +66,7 @@ def log_event(label, detail=None):
         # 如果填了详细内容，就再打印一行。
 
 
+# 尝试临时绑定给定主机和端口，返回是否可用；with 结束时关闭探测 socket。
 def is_port_available(host, port):
     """看端口有没有被占用"""
     # with 是同步上下文管理器：离开代码块时会自动关闭临时 socket。
@@ -73,6 +78,7 @@ def is_port_available(host, port):
     return True
 
 
+# 同步请求本机 Ollama 的模型列表并返回名称集合；网络或 JSON 错误交给调用者处理。
 def _ollama_models():
     """返回 Ollama 已安装的模型，而且不走系统代理。"""
     opener = build_opener(ProxyHandler({})) 
@@ -86,6 +92,8 @@ def _ollama_models():
     # 输出已安装模型
 
 
+# 同步就绪检查，必要时启动本机 Ollama 并在有限时间内等待；还会确认模型已安装。
+# 异步入口通过 to_thread 调用它，避免其中的同步网络和 sleep 阻塞 Gradio 事件循环。
 def ensure_ollama_ready():
     """保证 Ollama 已经准备好，能用。"""
     try:
@@ -136,6 +144,7 @@ def ensure_ollama_ready():
         )
 
 # async 异步的意思就是：它里面的事情可以等，不着急，可以一边等一边干别的
+# 没有正式 ASGI lifespan 的调用场景使用此懒加载路径，最终返回共享主图实例。
 async def _initialize_runtime():
     """在当前事件循环中按需初始化 Ollama、MCP 和 LangGraph Agent。"""
     # 接下来要修改外面的 _agent 和 _agent_init_task 这两个全局变量
@@ -157,6 +166,8 @@ async def _initialize_runtime():
     return _agent
 
 
+# 正常页面请求优先等待 lifespan 的就绪信号；测试等无 lifespan 场景才使用懒加载任务。
+# 复用正在运行的初始化任务，避免同一事件循环中的并发请求重复构图。
 async def get_agent():
     """返回应用生命周期里初始化好的 Agent，如果没有就懒加载一个"""
     global _agent, _agent_init_task
@@ -176,6 +187,7 @@ async def get_agent():
     # MCP Session 必须在创建它的事件循环中使用，因此需要记录并比较当前 loop。
     current_loop = asyncio.get_running_loop()
 
+    # 已失败或已取消的懒加载任务不能继续复用；不同 loop 创建的旧任务也会在下面被替换。
     task_failed = (
         _agent_init_task is not None    
         and _agent_init_task.done()
@@ -196,6 +208,8 @@ async def get_agent():
     return _agent
 
 
+# shutdown_event 是退出信号，checkpointer 是 lifespan 打开的 SQLite saver。
+# 由同一个长生命周期协程持有 MCP 的启动与关闭，避免上下文资源跨任务退出。
 async def _run_mcp_lifecycle(shutdown_event, checkpointer):
     """Start and stop MCP resources in one long-lived asyncio task."""
     # MCP 生命周期管理
@@ -223,6 +237,8 @@ async def _run_mcp_lifecycle(shutdown_event, checkpointer):
         await _mcp_manager.stop()
 
 
+# Gradio ASGI 生命周期回调：yield 前准备持久化器和管理任务，yield 后发出退出信号并等待回收。
+# 它不是每次聊天都运行，数据库连接和 MCP 会话覆盖整个应用运行期间。
 @asynccontextmanager
 async def app_lifespan(_app):
     """Own MCP resources for exactly the lifetime of the Gradio ASGI app."""
@@ -254,6 +270,7 @@ async def app_lifespan(_app):
         finally:
             log_event("MCP Lifecycle", "shutdown")
             shutdown_event.set()
+            # 退出前等待持有 MCP 上下文的那个任务自行关闭，随后外层 SQLite 上下文才能安全退出。
             await lifecycle_task
             _agent = None
             _agent_init_task = None
@@ -262,6 +279,7 @@ async def app_lifespan(_app):
             _runtime_error = None
 
 
+# 用固定标记剥离页面执行信息；返回值可进入历史，避免工具轨迹被误当成用户对话内容。
 def _answer_only(content):
     # 从 Agent 的回复中提取真正的回答内容，去掉附加的执行信息（例如耗时、调用工具、执行轨迹）。
     # 统一转换为字符串，兼容模型返回的非字符串 content。
@@ -270,6 +288,8 @@ def _answer_only(content):
     return text.split(EXECUTION_INFO_MARKER, 1)[0]
 
 
+# 兼容 Gradio 的字典或对象式历史，返回 HumanMessage/AIMessage 列表。
+# 这是没有 Checkpointer 时的回退；正式持久会话不再次把整个页面历史重复追加。
 def history_to_messages(history):
     # 把 Gradio 保存的聊天记录转换成 LangChain 能识别的消息对象，然后传给 LangGraph，让 Qwen3-8B 能够理解之前聊过什么。
     # 例如：history = [
@@ -295,6 +315,8 @@ def history_to_messages(history):
     return messages
 
 
+# 保留有限的字母数字、横线和下划线；为空时生成新 ID，供 SQLite 区分会话。
+# ID 是逻辑键，不直接作为磁盘文件名创建一个数据库。
 def _normalise_thread_id(thread_id):
     """限制会话 ID 字符，避免空值或任意长文本进入 Checkpointer 配置。"""
     cleaned = "".join(
@@ -305,22 +327,29 @@ def _normalise_thread_id(thread_id):
     return cleaned or uuid4().hex
 
 
+# 返回值顺序对应页面回调的四个输出：输入框、浏览器状态、聊天列表和提示。
+# 只切换会话 ID 并清空展示，不删除旧会话数据库记录。
 def _new_session():
     """创建空白短期会话，同时更新页面字段和浏览器持久状态。"""
     thread_id = uuid4().hex
     return thread_id, thread_id, [], f"已创建新会话：`{thread_id}`"
 
 
+# 读取浏览器保存的最近 ID，规范化后同时填回输入框和 BrowserState。
+# 它只恢复标识；真正读取持久化消息由 restore_session 完成。
 def _load_browser_session(stored_thread_id):
     """页面刷新后从 BrowserState 恢复上次使用的会话 ID。"""
     thread_id = _normalise_thread_id(stored_thread_id)
     return thread_id, thread_id
 
 
+# 按 thread_id 查询图快照，筛选用户消息与没有工具请求的模型回答并返回页面历史。
+# 工具调用及嵌套轨迹仍在数据库中，但此回调不把它们全部恢复成聊天气泡。
 async def restore_session(thread_id):
     """从 SQLite Checkpointer 读取可展示的用户消息和最终回答。"""
     thread_id = _normalise_thread_id(thread_id)
     agent = await get_agent()
+    # thread_id 指向同一个 SQLite 中的逻辑会话；查询快照不会重新执行模型或工具。
     snapshot = await agent.aget_state(
         {"configurable": {"thread_id": thread_id}}
     )
@@ -345,13 +374,17 @@ async def restore_session(thread_id):
     return history, status, thread_id
 
 
+# 给当前页面事件生成本地时分秒；实际耗时另用 perf_counter 测量，避免把墙钟时间当计时器。
 def _clock():
     """返回执行轨迹使用的本地时分秒。"""
     return datetime.now().strftime("%H:%M:%S")
 
 
+# 把工具名映射为页面上的 Agent 或 MCP 服务标签；只影响显示，不决定权限和实际路由。
 def _tool_label(tool_name):
     # 用于将 LangGraph 中实际调用的工具名称转换成用户容易理解的 MCP 服务名称
+    if tool_name in {"call_research_agent", "call_file_agent"}:
+        return tool_name.removeprefix("call_").removesuffix("_agent").title() + " Agent"
     if tool_name in {"search", "fetch_content"}:
         return "DuckDuckGo Search MCP"
     if tool_name.startswith("browser_"):
@@ -372,6 +405,38 @@ def _tool_label(tool_name):
     }:
         return "Filesystem MCP"
     return f"Unknown Tool ({tool_name})"
+
+
+# events 是带时间的页面事件，answer=None 表示执行中；其余参数构成最终诊断区。
+# 返回 Markdown 字符串，每次 yield 可替换当前助手气泡的展示内容。
+def _format_agent_event(event):
+    """将程序生成的结构化事件转成页面文字，明确哪个角色执行了哪个动作。"""
+    role = {"main": "Main Agent", "research": "Research Agent", "file": "File Agent"}.get(
+        event.get("agent_name"), str(event.get("agent_name", "unknown")))
+    kind = event.get("event_type", "unknown")
+    target = event.get("target", "-")
+    action = {
+        "main_reasoning_started": "继续推理", "main_reasoning_finished": "完成本次推理",
+        "delegation_started": "发起委托", "delegation_finished": "收到专业 Agent 结果",
+        "agent_started": "开始子任务", "agent_finished": "返回子任务结果",
+        "skill_loaded": "加载 Skill", "mcp_tool_started": "调用 MCP Tool",
+        "mcp_tool_finished": "收到 MCP Tool 结果", "tool_blocked": "拒绝越权或超限请求",
+        "tool_reused": "复用本次工具结果，进入分析收尾",
+        "analysis_repair_started": "修复分析报告（不调用 MCP）",
+        "analysis_repair_finished": "分析报告修复结束",
+    }.get(kind, kind)
+    label = (f"{role} | {kind} | {action} → {target} | {event.get('status')} | "
+             f"耗时 {event.get('elapsed_seconds', 0):.2f}s | "
+             f"task_id={event.get('task_id')} | parent_run_id={event.get('parent_run_id') or '-'}")
+    if event.get("summary"):
+        label += f" | 摘要：{str(event['summary'])[:500]}"
+    if event.get("retrieval_status"):
+        label += f" | 取证：{event['retrieval_status']} | 分析：{event.get('analysis_status', 'not_started')}"
+    if event.get("error"):
+        label += f" | 原因：{str(event['error'])[:180]}"
+    if event.get("event_type", "").startswith("mcp_tool_"):
+        label += f" | MCP={_tool_label(target)}"
+    return label
 
 
 def _render_progress(
@@ -402,6 +467,8 @@ def _render_progress(
     )
 
 
+# Gradio 的异步生成器回调，输入本轮文字、页面历史及会话 ID，逐次 yield 执行进度。
+# 正式会话只向图追加当前 HumanMessage；图内部的工具循环由 astream 驱动。
 async def chat(message, history, thread_id):
     """处理一轮 Web 对话，并通过异步生成器持续返回节点级进度。"""
     # message 是用户本轮输入；history 仅用于无 Checkpointer 的测试回退路径。
@@ -413,8 +480,11 @@ async def chat(message, history, thread_id):
     active_skills = []
     memory_statuses = []
     # 定义内部日志函数
-    def record(event):
-        events.append((_clock(), event))
+    # 闭包把事件文字和当前显示时间加入本轮列表；不会把诊断事件追加到模型 messages。
+    def record(event, timestamp=None):
+        # 嵌套事件在子图完成后集中展示，但使用其真实记录时间，而非全部标成返回时刻。
+        stamp = datetime.fromisoformat(timestamp).astimezone().strftime("%H:%M:%S") if timestamp else _clock()
+        events.append((stamp, event))
 
     # 请求日志只记录长度和会话前缀，避免把密码等敏感记忆原文写入终端日志。
     log_event(
@@ -445,14 +515,22 @@ async def chat(message, history, thread_id):
         async for update in agent.astream(
             # 传给 LangGraph 的初始 State
             {"messages": messages},
-            config={"configurable": {"thread_id": thread_id}},
+            config={"configurable": {"thread_id": thread_id}, "recursion_limit": 60},
             # updates 表示按节点输出状态更新
             # 目前实现的是节点级进度更新，不是模型逐 Token 输出
             stream_mode="updates",
         ):
             # 遍历本次节点更新
             # 每次 update 通常包含刚执行完成的节点名称及该节点返回的状态增量。
+            # updates 模式给出刚完成节点的状态增量，不是模型逐 Token 文本，也不是完整会话快照。
             for node_name, node_output in update.items():
+                structured_events = node_output.get("agent_events", [])
+                for event in structured_events:
+                    record(_format_agent_event(event), event.get("timestamp"))
+                    if event.get("event_type") == "mcp_tool_started":
+                        called_tools.append(_tool_label(event["target"]))
+                    elif event.get("event_type") == "skill_loaded":
+                        active_skills.append(f"{event['agent_name']}/{event['target']}")
                 node_messages = node_output.get("messages", [])
                 if not isinstance(node_messages, list):
                     node_messages = [node_messages]
@@ -495,7 +573,7 @@ async def chat(message, history, thread_id):
                             tool_name = call.get("name", "unknown")
                             tool_label = _tool_label(tool_name)
                             called_tools.append(tool_label)
-                            record(f"调用 {tool_label}（{tool_name}）")
+                            record(f"Main Agent 请求 {tool_label}（{tool_name}）")
                     # 如果没有工具调用，就提取回答
                     elif response is not None:
                         final_answer = _answer_only(response.content)
@@ -509,7 +587,26 @@ async def chat(message, history, thread_id):
                     # ToolMessage 表示工具节点已经返回消息，但内容仍可能是失败信息。
                     for tool_message in node_messages:
                         if isinstance(tool_message, ToolMessage):
-                            record(f"工具返回结果（{tool_message.name}）")
+                            record(f"Main Agent 收到工具结果（{tool_message.name}）")
+                            # 专业 Agent 的内部消息没有流入主图；这里读取其 JSON 结果内的 trace 复用现有页面展示。
+                            if not structured_events and tool_message.name in {"call_research_agent", "call_file_agent"}:
+                                # 嵌套轨迹随结构化工具结果返回，沿用现有 updates 渲染机制。
+                                try:
+                                    payload = json.loads(str(tool_message.content))
+                                    trace = payload.get("trace", {})
+                                    record(f"Agent 开始：{trace.get('caller', 'main')} → "
+                                           f"{payload.get('agent_name')}；调用 {trace.get('call_id', '-')}；"
+                                           f"任务 {payload.get('task_id')}：{trace.get('task', '')}")
+                                    for event in trace.get("tools", []):
+                                        called_tools.append(_tool_label(event['tool']))
+                                        record(f"子 Agent MCP：{event['tool']} → {event['status']} "
+                                               f"({event.get('elapsed_seconds', 0):.2f}s)")
+                                    record(f"Agent 结束：{payload.get('status')}；"
+                                           f"耗时 {trace.get('elapsed_seconds', 0):.2f}s；"
+                                           f"摘要：{payload.get('summary', '')[:500]}；"
+                                           f"失败原因：{payload.get('error') or '无'}")
+                                except (ValueError, TypeError, KeyError):
+                                    record("Agent 返回格式无效，请查看工具错误")
                 # 继续更新 Gradio 页面
                 yield _render_progress(events)
 
@@ -548,8 +645,26 @@ async def chat(message, history, thread_id):
         )
 
 
+# 使用系统常见字体，不依赖主题自带的 Montserrat 或在线字体下载。
+# Times New Roman 显示英文；它没有中文字形时回退到黑体，再回退到微软雅黑。
+APP_THEME = gr.themes.Soft(
+    # Gradio 6.30 启动统计会比较 Font 对象；直接传字符串会在 __eq__ 中触发 AttributeError。
+    # 基础 Font 仅声明系统字体族，不像 GoogleFont/LocalFont 那样下载或加载额外字体文件。
+    font=[gr.themes.Font(name) for name in ("Times New Roman", "SimHei", "Microsoft YaHei", "serif")],
+    font_mono=[gr.themes.Font(name) for name in ("Consolas", "Courier New", "monospace")],
+)
+
 CSS = """
 .gradio-container { max-width: 1050px !important; margin: 0 auto !important; }
+.gradio-container { --font: "Times New Roman", "SimHei", "Microsoft YaHei", serif;
+    font-family: var(--font) !important; }
+.gradio-container input, .gradio-container textarea, .gradio-container button,
+.gradio-container select, .gradio-container .prose {
+    font-family: var(--font) !important; }
+.gradio-container input::placeholder, .gradio-container textarea::placeholder {
+    font-family: var(--font); font-style: normal; }
+.gradio-container pre, .gradio-container code {
+    font-family: "Consolas", "Courier New", monospace !important; }
 #hero { text-align: center; margin: 12px 0 4px; }
 #hero h1 { font-size: 2rem; margin-bottom: 0.35rem; }
 #hero p { color: var(--body-text-color-subdued); }
@@ -566,6 +681,7 @@ with gr.Blocks() as demo:
         elem_id="hero",
     )
     # BrowserState 把最近会话 ID 保存在本机浏览器；SQLite 保存真正的消息状态。
+    # 浏览器只保存最近会话标识；真正的消息和工具记录仍在本机 SQLite 中。
     browser_thread_id = gr.BrowserState(
         default_value="",
         storage_key="local-personal-agent-thread-id",
@@ -585,6 +701,7 @@ with gr.Blocks() as demo:
         layout="bubble",
         placeholder="例如：查看当前目录有哪些文件",
     )
+    # fn 指定异步请求回调；additional_inputs 把页面会话 ID 作为第三个参数交给 chat。
     gr.ChatInterface(
         # additional_inputs 把稳定 thread_id 一并交给 chat()。
         fn=chat,
@@ -609,6 +726,7 @@ with gr.Blocks() as demo:
         inputs=[browser_thread_id],
         outputs=[thread_id_box, browser_thread_id],
     )
+    # 回调输出组件的顺序要与返回值顺序对应，这里把规范化后的 ID 同步给 BrowserState。
     thread_id_box.change(
         lambda value: _normalise_thread_id(value),
         inputs=[thread_id_box],
@@ -618,6 +736,7 @@ with gr.Blocks() as demo:
         _new_session,
         outputs=[thread_id_box, browser_thread_id, chatbot, session_status],
     )
+    # 恢复按钮读取已保存的状态并更新聊天区，不会把历史作为新用户请求再跑一次图。
     restore_session_button.click(
         restore_session,
         inputs=[thread_id_box],
@@ -634,7 +753,7 @@ if __name__ == "__main__":
     demo.queue(default_concurrency_limit=4).launch(
         server_name="127.0.0.1",
         server_port=7860,
-        theme=gr.themes.Soft(),
+        theme=APP_THEME,
         css=CSS,
         app_kwargs={"lifespan": app_lifespan},
     )

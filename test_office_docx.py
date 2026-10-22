@@ -1,3 +1,5 @@
+# Office Writer 的真实写入测试：在桌面生成 DOCX，再检查 ZIP 结构和文档内容。
+# 此测试会产生用户可见文件，不能作为没有外部副作用的普通导入检查。
 import asyncio
 import os
 from pathlib import Path
@@ -9,9 +11,12 @@ from mcp_client.manager import MCPManager
 from mcp_client.tools import CONFIG_PATH
 
 
+# 在用户桌面实际生成固定名称的 DOCX，再用 zipfile 与 python-docx 读取验证。
+# 如果已存在同名文件可能被覆盖，重复运行前应确认允许写入这个固定桌面路径。
 async def main():
     """创建真实 DOCX，并验证 ZIP 结构和可读文字。"""
     desktop = Path(os.environ.get("USERPROFILE", str(Path.home()))) / "Desktop"
+    # 固定输出名用于后续验证，也意味着重复运行可能覆盖同名桌面文件。
     output_path = desktop / "Local-Personal-Agent-Office-MCP-Test.docx"
 
     async with MCPManager(CONFIG_PATH) as manager:

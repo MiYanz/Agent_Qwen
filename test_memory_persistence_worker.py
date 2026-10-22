@@ -1,3 +1,5 @@
+# 持久化测试的子进程入口，由 test_memory_persistence.py 传入文件路径和操作类型。
+# memory 分支走真实 Memory MCP；checkpoint 分支使用最小图，不访问 Ollama。
 import argparse
 import asyncio
 from pathlib import Path
@@ -10,6 +12,7 @@ from mcp_client.manager import MCPManager
 from memory.manager import MemoryManager
 
 
+# 使用 args.config 中的专用配置执行一次写入、读取或删除，断言后退出真实 MCP 上下文。
 async def memory_mode(args):
     async with MCPManager(args.config) as mcp_manager:
         memory = MemoryManager(mcp_manager)
@@ -27,7 +30,10 @@ async def memory_mode(args):
         print(f"MEMORY_PROCESS_{args.action.upper()}=PASS")
 
 
+# 构造只有 answer 节点的最小图，把 SQLite 持久化与模型、MCP 完全分离。
+# args.database 是父进程提供的临时数据库，thread_id 是要验证的会话分区。
 async def checkpoint_mode(args):
+    # 用消息数量生成确定性回复，方便父进程检查图状态确实写入并能被后续进程读取。
     async def answer(state):
         return {"messages": [AIMessage(content=f"turn:{len(state['messages'])}")]}
 
@@ -35,6 +41,7 @@ async def checkpoint_mode(args):
     builder.add_node("answer", answer)
     builder.add_edge(START, "answer")
     builder.add_edge("answer", END)
+    # 同一数据库下更换 thread_id 应得到独立图状态，而不是另一个文件或一个新数据库。
     config = {"configurable": {"thread_id": args.thread_id}}
     async with AsyncSqliteSaver.from_conn_string(args.database) as saver:
         await saver.setup()
@@ -54,6 +61,8 @@ async def checkpoint_mode(args):
         print(f"CHECKPOINT_PROCESS_{args.action.upper()}=PASS")
 
 
+# 解析父进程传入的存储类型及操作，路由到 Memory 或 SQLite 分支。
+# 只在 checkpoint 分支创建数据库父目录，不更改正式项目配置。
 async def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("kind", choices=("memory", "checkpoint"))

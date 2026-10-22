@@ -1,3 +1,5 @@
+# 真实 MCP 连续调用测试：搜索、读取网页、转换指定 PDF，并检查缺失文件的错误结果。
+# 默认 PDF 是用户磁盘中的现有文件；运行前需确认路径和网络环境适合测试。
 import argparse
 import asyncio
 import json
@@ -16,6 +18,8 @@ if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(errors="backslashreplace")
 
 
+# pdf_path 来自命令行或默认真实路径；连续搜索、抓网页并转换该 PDF。
+# 最后用不存在的同目录文件检查失败 JSON；这一测试不是纯离线或纯临时数据测试。
 async def main(pdf_path):
     """验证联网搜索、网页正文获取、PDF 转换和错误返回结构。"""
     async with MCPManager(CONFIG_PATH) as manager:
@@ -50,6 +54,7 @@ async def main(pdf_path):
         missing = await tools["pdf_convert_to_markdown"].ainvoke(
             {"uri": str(pdf_path.with_name("missing-test-file.pdf"))}
         )
+        # 这组断言按测试当前约定检查错误字段；它不是生产代码里自动补齐字段的逻辑。
         error = json.loads(missing)
         assert error["status"] == "failed"
         assert {

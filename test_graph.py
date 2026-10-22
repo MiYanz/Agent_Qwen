@@ -1,3 +1,5 @@
+# 完整主图的真实服务测试：默认请求新闻，并输出整条消息链。
+# 执行会启动真实 MCP、调用 Ollama 和图中的 Memory 节点，不属于纯离线单元测试。
 import asyncio
 import json
 import sys
@@ -13,6 +15,8 @@ if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(errors="backslashreplace")
 
 
+# 命令行文字作为实际任务，否则使用默认新闻问题；真实运行主图后检查消息链结构。
+# 通过 async with 关闭 MCP，断言最终是非空且不再请求工具的 AIMessage。
 async def main():
     """执行一次完整 Graph，并验证最终消息和工具消息的基本结构。"""
     # 命令行参数会拼成测试问题；未提供参数时使用默认新闻问题。
@@ -28,6 +32,7 @@ async def main():
             {"messages": [HumanMessage(content=query)]}
         )
 
+    # 最终 state 包含本轮用户、模型和工具消息；观察这些消息能理解工具调用是如何回到模型的。
     messages = result["messages"]
     # 打印完整消息链，便于确认 HumanMessage → ToolMessage → AIMessage 流程。
     for message in messages:

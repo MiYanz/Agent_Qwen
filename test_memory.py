@@ -1,3 +1,5 @@
+# 离线长期记忆回归：FakeMCPManager 用内存列表模拟 MCP 的实体和观察记录。
+# 所有新增、更新和清空操作只改变测试对象，不读写正式 memory.jsonl。
 import asyncio
 from types import SimpleNamespace
 
@@ -5,18 +7,23 @@ from memory.manager import MemoryManager
 from memory.policy import candidate_from_content
 
 
+# 模拟 Memory MCP 的实体及 observation 增删接口，让真实 MemoryManager 在内存后端上运行。
 class FakeMCPManager:
     """只在单元测试中模拟 Memory MCP 的知识图谱行为。"""
 
+    # entities 是测试存储，fail 用来在任意请求时制造后端不可用。
     def __init__(self, fail=False):
         self.entities = []
         self.fail = fail
 
+    # 按原始 MCP 工具名修改内存图谱，返回可供真实解析器读取的 structuredContent。
+    # 未知服务或工具直接报错，以便发现测试未覆盖的意外调用。
     async def call_tool(self, tool_name, arguments, server_name="memory"):
         if self.fail:
             raise RuntimeError("simulated unavailable storage")
         if server_name != "memory":
             raise AssertionError(server_name)
+        # 返回浅拷贝列表模拟读取；下面的写分支只操作这个 Fake 的 entities，不会连到真实 Memory MCP。
         if tool_name == "read_graph":
             return SimpleNamespace(
                 structuredContent={"entities": list(self.entities), "relations": []}
@@ -50,12 +57,16 @@ class FakeMCPManager:
         return SimpleNamespace(structuredContent={"success": True})
 
 
+# 在相同 Fake 后端前增加异步等待，用于验证 MemoryManager 的等待上限。
 class SlowMCPManager(FakeMCPManager):
+    # 先让出事件循环再调用父类；测试设置的更短 timeout 应在等待中取消请求。
     async def call_tool(self, tool_name, arguments, server_name="memory"):
         await asyncio.sleep(0.05)
         return await super().call_tool(tool_name, arguments, server_name)
 
 
+# 按保存、自动策略、更新去重、相关性、删除、错误和确认清空顺序执行断言。
+# 这些操作只修改 backend.entities，不使用用户正式记忆文件。
 async def main():
     backend = FakeMCPManager()
     manager = MemoryManager(backend)

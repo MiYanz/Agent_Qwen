@@ -1,3 +1,5 @@
+# 真实模型的多场景行为回归：依次尝试新闻、热搜、本地文档、文本和目录任务。
+# 案例中的路径是实际读取目标；断言观察的是主图消息，不会自动展开子 Agent 内部消息。
 import asyncio
 import sys
 
@@ -47,6 +49,8 @@ CASES = (
 # 每个用例依次保存名称、用户问题，以及预期至少出现的一个工具名称。
 
 
+# query 是实际任务，expected_tools 是期望看到的主图 ToolMessage 名称集合。
+# 检查最终回答经过模型处理，并打印调用链；不会展开嵌套专业 Agent 的内部消息。
 async def run_case(graph, name, query, expected_tools):
     """执行单个行为用例，并验证工具结果最终经过 Agent 二次处理。"""
     result = await graph.ainvoke({"messages": [HumanMessage(content=query)]})
@@ -57,6 +61,7 @@ async def run_case(graph, name, query, expected_tools):
 
     assert isinstance(final, AIMessage) and not final.tool_calls
     assert str(final.content).strip()
+    # 检查集合交集非空，表示至少出现一个期望工具；这里检查的是主图 ToolMessage 而非嵌套 trace。
     assert expected_tools & tool_names, (name, expected_tools, tool_names)
     # 最终回答不能与任一 ToolMessage 完全相同，防止工具原始结果直出。
     assert all(str(final.content).strip() != str(m.content).strip() for m in tool_messages)
@@ -69,6 +74,7 @@ async def run_case(graph, name, query, expected_tools):
     print("FINAL=" + str(final.content)[:2000])
 
 
+# 同一管理器和无 Checkpointer 的主图处理多组独立输入，避免每个用例重复启动整套服务。
 async def main():
     """复用一个 MCPManager 和 Graph 顺序执行全部回归用例。"""
     async with MCPManager(CONFIG_PATH) as manager:
